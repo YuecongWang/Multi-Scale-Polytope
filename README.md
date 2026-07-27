@@ -1,8 +1,8 @@
-<img width="2670" height="2060" alt="global_pca_target_centroids_layer4_pooled" src="https://github.com/user-attachments/assets/ff825f63-8269-4f0b-b51b-4f88399bb72c" /># Multi-Scale-Polytope
+# Multi-Scale-Polytope
 Inspired by convex  poisoning, Multi-Scale-Polytope is a novel concept that integrates the geometric properties of convex  with multi-scale decomposition and fusion mechanisms to achieve both global stability and local adaptability, breaking through the limitations of traditional single-scale strategies.
 
 
-How to use BP-MSP Test?
+#How to use BP-MSP Test?
 ----
 python visualize_msp_features_bp_fixed_v3.py ^
 --gpu 0 ^
