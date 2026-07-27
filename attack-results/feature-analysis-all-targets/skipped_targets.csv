@@ -1,0 +1,19 @@
+target_index,bp_path,msp_path,reason
+0,0-overlap\linear-transfer-learning\mean\800\0\poison_00799.pth,0-mix-bp\linear-transfer-learning\mean\800\0\poison_00799.pth,MSP poison missing
+1,0-overlap\linear-transfer-learning\mean\800\1\poison_00799.pth,0-mix-bp\linear-transfer-learning\mean\800\1\poison_00799.pth,BP poison missing
+34,0-overlap\linear-transfer-learning\mean\800\34\poison_00799.pth,0-mix-bp\linear-transfer-learning\mean\800\34\poison_00799.pth,BP poison missing; MSP poison missing
+35,0-overlap\linear-transfer-learning\mean\800\35\poison_00799.pth,0-mix-bp\linear-transfer-learning\mean\800\35\poison_00799.pth,BP poison missing; MSP poison missing
+36,0-overlap\linear-transfer-learning\mean\800\36\poison_00799.pth,0-mix-bp\linear-transfer-learning\mean\800\36\poison_00799.pth,BP poison missing; MSP poison missing
+37,0-overlap\linear-transfer-learning\mean\800\37\poison_00799.pth,0-mix-bp\linear-transfer-learning\mean\800\37\poison_00799.pth,BP poison missing; MSP poison missing
+38,0-overlap\linear-transfer-learning\mean\800\38\poison_00799.pth,0-mix-bp\linear-transfer-learning\mean\800\38\poison_00799.pth,BP poison missing; MSP poison missing
+39,0-overlap\linear-transfer-learning\mean\800\39\poison_00799.pth,0-mix-bp\linear-transfer-learning\mean\800\39\poison_00799.pth,BP poison missing; MSP poison missing
+40,0-overlap\linear-transfer-learning\mean\800\40\poison_00799.pth,0-mix-bp\linear-transfer-learning\mean\800\40\poison_00799.pth,BP poison missing; MSP poison missing
+41,0-overlap\linear-transfer-learning\mean\800\41\poison_00799.pth,0-mix-bp\linear-transfer-learning\mean\800\41\poison_00799.pth,BP poison missing; MSP poison missing
+42,0-overlap\linear-transfer-learning\mean\800\42\poison_00799.pth,0-mix-bp\linear-transfer-learning\mean\800\42\poison_00799.pth,BP poison missing; MSP poison missing
+43,0-overlap\linear-transfer-learning\mean\800\43\poison_00799.pth,0-mix-bp\linear-transfer-learning\mean\800\43\poison_00799.pth,BP poison missing; MSP poison missing
+44,0-overlap\linear-transfer-learning\mean\800\44\poison_00799.pth,0-mix-bp\linear-transfer-learning\mean\800\44\poison_00799.pth,BP poison missing; MSP poison missing
+45,0-overlap\linear-transfer-learning\mean\800\45\poison_00799.pth,0-mix-bp\linear-transfer-learning\mean\800\45\poison_00799.pth,BP poison missing; MSP poison missing
+46,0-overlap\linear-transfer-learning\mean\800\46\poison_00799.pth,0-mix-bp\linear-transfer-learning\mean\800\46\poison_00799.pth,BP poison missing; MSP poison missing
+47,0-overlap\linear-transfer-learning\mean\800\47\poison_00799.pth,0-mix-bp\linear-transfer-learning\mean\800\47\poison_00799.pth,BP poison missing; MSP poison missing
+48,0-overlap\linear-transfer-learning\mean\800\48\poison_00799.pth,0-mix-bp\linear-transfer-learning\mean\800\48\poison_00799.pth,BP poison missing; MSP poison missing
+49,0-overlap\linear-transfer-learning\mean\800\49\poison_00799.pth,0-mix-bp\linear-transfer-learning\mean\800\49\poison_00799.pth,BP poison missing; MSP poison missing
