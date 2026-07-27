@@ -18,11 +18,15 @@ python visualize_msp_features_bp_fixed_v3.py ^
 --multi-scale-layers 3 ^
 --out-dir "attack-results/feature-analysis"
 The Result is :
+
+
 1.One Target:
 <img width="2970" height="2210" alt="figure_g_pca_distance_layer4_pooled" src="https://github.com/user-attachments/assets/7ba3d816-e822-4042-b8d4-c60a25e2e360" />
 <img width="2662" height="2066" alt="figure_g_pca_layer4_pooled" src="https://github.com/user-attachments/assets/19a690da-20d3-4951-8845-32a1db9129bc" />
 <img width="2662" height="2066" alt="figure_h_pca_concat" src="https://github.com/user-attachments/assets/afc474fb-a8aa-4f6d-ba6f-bfc7c63b0b88" />
 <img width="2970" height="2209" alt="figure_h_pca_distance_concat" src="https://github.com/user-attachments/assets/2ba990bf-c976-4964-a845-851f67a1514e" />
+
+
 
 2.All Targets:
 <img width="2670" height="2060" alt="global_pca_target_centroids_layer4_pooled" src="https://github.com/user-attachments/assets/1acc3d29-4ebe-4b83-9dc5-82132f2bc1a0" />
