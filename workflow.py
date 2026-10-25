@@ -6,10 +6,25 @@ import shlex
 import subprocess
 import sys
 
-from experiment_protocol import METHODS, checkpoint_path, validate_attack
+from experiment_protocol import METHODS, checkpoint_path, method_name, resolve_training_options, validate_attack
 from train_cifar10_models import MODEL_NAMES
 
 ROOT = Path(__file__).resolve().parent
+
+
+def method_training_options(attack, victim, method):
+    """Preserve method defaults while allowing independent victim fine-tuning."""
+    mode, feature, default_blocks = METHODS[method]
+    settings = resolve_training_options(
+        None, feature,
+        attack_representation=attack.get('representation', 'blocks' if default_blocks else 'features'),
+        victim_training=victim.get('training', 'end2end' if default_blocks else 'linear'),
+        victim_model_mode=victim.get('model_mode', 'eval'))
+    canonical = method_name(mode, feature, settings['attack_end2end'])
+    if canonical != method:
+        raise ValueError(f'attack.representation changes {method} into {canonical}; '
+                         f'use the matching method label {canonical}')
+    return settings
 
 
 def load_config(path):
@@ -26,9 +41,9 @@ def load_config(path):
         'pretrain': {'epochs', 'lr', 'batch_size', 'seed', 'sidx', 'eidx', 'workers', 'milestones'},
         'attack': {'methods', 'targets', 'substitute_nets', 'checkpoints', 'dropouts', 'net_repeat',
                    'target_label', 'poison_label', 'target_start', 'poison_num', 'iterations', 'lr',
-                   'epsilon', 'optimizer', 'decay_iterations', 'decay_ratio', 'subset_group'},
+                   'epsilon', 'optimizer', 'decay_iterations', 'decay_ratio', 'subset_group', 'representation'},
         'victim': {'nets', 'checkpoint', 'epochs', 'lr', 'optimizer', 'momentum', 'weight_decay',
-                   'batch_size', 'num_per_class', 'milestones'},
+                   'batch_size', 'num_per_class', 'milestones', 'training', 'model_mode'},
     }
     for section, keys in sections.items():
         if section not in config or not isinstance(config[section], dict):
@@ -50,15 +65,26 @@ def load_config(path):
         raise ValueError('Dropout must lie within [0, 1)')
     if config.get('device', 'cuda') not in ('cuda', 'cpu'):
         raise ValueError('device must be cuda or cpu')
+    uses_blocks = False
+    canonical_methods = set()
     for method in a['methods']:
         if method not in METHODS:
             raise ValueError('Unknown method: ' + method)
-        validate_attack(*METHODS[method], a.get('net_repeat', 1), a.get('poison_num', 5))
+        mode, feature, _ = METHODS[method]
+        settings = method_training_options(a, v, method)
+        canonical = method_name(mode, feature, settings['attack_end2end'])
+        if canonical in canonical_methods:
+            raise ValueError('Method labels select the same canonical algorithm: ' + canonical)
+        canonical_methods.add(canonical)
+        validate_attack(mode, feature, settings['attack_end2end'],
+                        a.get('net_repeat', 1), a.get('poison_num', 5))
+        uses_blocks = uses_blocks or settings['attack_end2end']
     names = a['substitute_nets'] + v['nets']
     if set(names) - set(MODEL_NAMES):
         raise ValueError('Unknown architecture: ' + ', '.join(sorted(set(names)-set(MODEL_NAMES))))
-    if any(METHODS[method][2] for method in a['methods']):
-        unsupported = [name for name in names if not name.startswith(('ResNet', 'ResNeXt', 'DPN', 'SENet'))]
+    if uses_blocks:
+        unsupported = [name for name in a['substitute_nets']
+                       if not name.startswith(('ResNet', 'ResNeXt', 'DPN', 'SENet'))]
         if unsupported:
             raise ValueError('Original E2E block interface unavailable for: ' + ', '.join(unsupported))
     if not 0 <= a.get('epsilon', .1) <= 1:
@@ -135,10 +161,14 @@ def build_plan(config):
         plan['pretrain'].append(cmd)
     for target in a['targets']:
         for method in a['methods']:
-            mode, feature, end2end = METHODS[method]
+            mode, feature, _ = METHODS[method]
+            settings = method_training_options(a, v, method)
             options = {'gpu': config.get('gpu', '0'), 'device': config.get('device', 'cuda'),
                 'seed': config.get('seed', 2026), 'mode': mode, 'feature-mode': feature,
-                'end2end': str(end2end).lower(), 'substitute-nets': a['substitute_nets'],
+                'attack-representation': settings['attack_representation'],
+                'victim-training': settings['victim_training'],
+                'victim-model-mode': settings['victim_model_mode'],
+                'substitute-nets': a['substitute_nets'],
                 'subs-chk-name': a['checkpoints'], 'subs-dp': a['dropouts'], 'target-net': v['nets'],
                 'test-chk-name': v['checkpoint'], 'model-resume-path': config['model_directory'],
                 'train-data-path': data['split'], 'dset-path': data['root'],

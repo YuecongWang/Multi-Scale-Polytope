@@ -1,170 +1,222 @@
 # Multi-scale Polytope Poisoning
 
-基于 Bullseye Polytope（BP）与 Convex Polytope（CP）的干净标签投毒研究项目。MSP 在生成毒样本时引入多个 stage 的特征，提供池化拼接、展平拼接与逐层归一化对照，并用统一的数据、模型和受害训练协议比较这些方法。
+A clean-label poisoning research project built on **Bullseye Polytope (BP)** and **Convex Polytope (CP)**. MSP uses features from several network stages to construct poisons, with pooled concatenation, flattened concatenation, and equally weighted layerwise objectives.
 
-本项目是对原实现的扩展。**MSP 的主要区别在攻击特征和损失聚合，不在给分类网络增加一套参数，也不在另换受害训练超参数。** 相同的预训练与受害训练条件是比较 BP/CP/MSP 所需要的控制变量；是否提升成功率，需要配对实验验证。
+The repository provides a shared CIFAR-10 workflow for **linear transfer** and **full-parameter victim fine-tuning**. Pretraining and victim training stay matched across methods so that experiments measure the effect of the attack representation and loss.
 
-- [完整脚本目录：每个验证、训练、评估和分析脚本的作用](docs/SCRIPT_CATALOG.md)
-- [参数、数学目标、实验规划与结果解释](docs/PARAMETERS_AND_PROTOCOL.md)
-- [迁移说明、行为变化及验证范围](docs/MIGRATION.md)
-- [模型选层与特征接口](models/README.md)
-- [保留的上游项目说明](docs/UPSTREAM_README.md)
-- [原 GitHub 首页与历史可视化结果](docs/LEGACY_GITHUB_README.md)
+[Chinese guide](README_zh.md) · [Script catalog](docs/SCRIPT_CATALOG.md) · [Parameters and protocol](docs/PARAMETERS_AND_PROTOCOL.md) · [Migration and validation](docs/MIGRATION.md) · [Model feature interfaces](models/README.md)
 
-## 方法与支持范围
+## Methods and training scenarios
 
-| 方法名 | 目标函数 | 攻击特征 | 场景 |
-| --- | --- | --- | --- |
-| CP-Original | 求单纯形系数的凸包重建误差 | 原末层特征 | linear transfer |
-| BP-Original | 毒样本质心到目标的归一化范数 | 原末层特征 | linear transfer |
-| MSP-Pool | BP 质心目标 | 三个 stage 分别全局平均池化后拼接 | linear transfer |
-| MSP-Flat | BP 质心目标 | 三个 stage 展平后拼接 | linear transfer |
-| MSP-Flat-Layerwise | 每层归一化误差的等权平均 | 与 MSP-Flat 相同的三个 stage | linear transfer |
-| BP-3Layer-Pool-Control | 每层归一化误差的等权平均 | 三层各自池化 | linear transfer，受控对照 |
-| BP-E2E-Original / CP-E2E-Original | 原版 block 特征目标 | 原模型 block 接口 | 原版 end-to-end 微调 |
+Attack representation and victim training are independent choices:
 
-MSP 模式目前只实现 linear transfer。将 MSP 特征与 end-to-end 同时启用会明确报错。原版 end-to-end 的攻击 block 接口支持 ResNet、ResNeXt、DPN、SENet；DenseNet、GoogLeNet、MobileNetV2 不提供该接口。end-to-end 在此指更新预训练受害模型全部参数，**不等于随机初始化后从零训练**。
+| Setting | Values | Meaning |
+| --- | --- | --- |
+| `attack.representation` | `features` / `blocks` | Use the selected feature-mode objective, or the original BP/CP block objective |
+| `victim.training` | `linear` / `end2end` | Update only the classifier head, or all pretrained victim parameters |
+| `victim.model_mode` | `eval` / `train` | Control BatchNorm/dropout behavior during victim optimization; linear training requires `eval` |
 
-## 目录
+**MSP supports both victim training scenarios with `attack.representation="features"`.** For example, `MSP-Flat` remains the method name when `victim.training` changes from `linear` to `end2end`. Full-parameter optimization in `eval` mode still computes gradients and updates the backbone; it keeps BatchNorm running statistics fixed.
+
+| Method | Objective | Attack features |
+| --- | --- | --- |
+| CP-Original | Simplex-constrained convex-hull reconstruction | Original penultimate features |
+| BP-Original | Normalized poison-centroid residual | Original penultimate features |
+| MSP-Pool | BP centroid objective | Global-average-pooled features from three stages, concatenated |
+| MSP-Flat | BP centroid objective | Flattened features from three stages, concatenated |
+| MSP-Flat-Layerwise | Mean of per-layer normalized residuals | The same three stages, flattened separately |
+| BP-3Layer-Pool-Control | Mean of per-layer normalized residuals | Three separately pooled stages |
+| BP-E2E-Original / CP-E2E-Original | Original BP/CP block objective | Original `block=True` interface; compatibility method names |
+
+The first six methods use `features` and can be evaluated with either linear or full-parameter victims. MSP does not require a block interface. All seven model families can serve as victims: ResNet, SENet, DPN, ResNeXt, DenseNet, GoogLeNet, and MobileNetV2.
+
+The original `blocks` attack requires **proxy** models with a block interface: ResNet, ResNeXt, DPN, or SENet. Its diagnostic victim uses final features, so the victim does not need that interface. Use a separate configuration for this historical block baseline.
+
+Here, end-to-end means fine-tuning all parameters of a **pretrained** victim. Poison construction still freezes proxies and optimizes pixels. The workflow does not differentiate through an unrolled victim-training procedure, and end-to-end does not mean training a randomly initialized victim from scratch.
+
+## Repository layout
 
 ~~~text
-configs/                         冒烟与正式实验配置
-prepare_data.py                  从官方 CIFAR-10 训练集构建新 split
-workflow.py                      计划、预训练、生成、评估的统一入口
-train_cifar10_models.py          干净模型预训练、续训、权重单独评估
-craft_poisons_transfer.py        单目标 BP/CP/MSP 分阶段入口
-trainer.py                      共用攻击优化与受害训练
-models/                         分类网络和多层特征接口
-summarize_results.py             汇总全样本/条件 ASR 与干净准确率
-tests/                          配置、数据契约、结果统计、真实张量回归
-verify_layerwise.py             七种真实模型的特征和梯度检查
-launch/  analysis/              历史实验包装与结果分析
-Multi-Target-Mode/              独立的历史多目标实验
-runs/                           新实验产物，默认被 Git 忽略
+configs/                         Linear and full-parameter smoke/benchmark configurations
+prepare_data.py                  Build a documented split from official CIFAR-10 training data
+workflow.py                      Plan, pretrain, craft, and evaluate
+train_cifar10_models.py          Clean pretraining, resume, and checkpoint-only evaluation
+craft_poisons_transfer.py        Staged CP/BP/MSP experiments
+trainer.py                      Shared attack objectives and victim training
+models/                         Classifiers and multistage feature interfaces
+summarize_results.py             ASR, conditional ASR, and clean-accuracy summaries
+tests/                          Planning, data contracts, statistics, and tensor regressions
+verify_layerwise.py             Feature/gradient checks for seven real architectures
+launch/  analysis/              Historical experiment wrappers and result analysis
+Multi-Target-Mode/              Separate historical external-target experiments
+runs/                           New experiment outputs; ignored by Git
 ~~~
 
-## 1. 安装环境
+## 1. Install the environment
 
-以下命令从仓库根目录执行。先按 [PyTorch 官方安装选择器](https://pytorch.org/get-started/locally/)选择匹配操作系统和 CPU/CUDA 的 torch、torchvision，再安装其余依赖。requirements 是依赖范围，不是已验证的锁定环境。
+Run the commands from the repository root. Install a matching torch/torchvision pair for your CPU or CUDA environment using the [PyTorch installation selector](https://pytorch.org/get-started/locally/), then install the remaining dependencies. `requirements.txt` specifies dependency ranges, rather than a fully pinned environment.
 
 ~~~powershell
 conda create -n msp python=3.11 -y
 conda activate msp
-# 在这里执行 PyTorch 官方选择器给出的安装命令
+# Run the appropriate torch/torchvision installation command here.
 python -m pip install -r requirements.txt
 python -c "import torch, torchvision; print(torch.__version__, torchvision.__version__, torch.cuda.is_available())"
 ~~~
 
-只查看计划和运行不依赖张量的测试，不需要安装 PyTorch：
+Planning and dependency-free contract tests can run without PyTorch:
 
 ~~~powershell
 python workflow.py --config configs/smoke.json --stage plan
+python workflow.py --config configs/smoke_end2end.json --stage plan
 python -m unittest discover -s tests -v
 ~~~
 
-正式 GPU 实验将配置中的 device 设为 cuda；CPU 可执行小规模检查。Windows 的预训练 workers 默认使用 0。
+Real tensor tests explicitly skip when torch is unavailable. Use CUDA for substantial experiments; CPU is useful for small execution checks. Windows pretraining defaults to `workers=0`.
 
-## 2. 准备数据
+## 2. Prepare the data
 
-已有上游 split 时，将其放到 datasets/CIFAR10_TRAIN_Split.pth，并保留其来源；严格复现上游结果需要相同的实际 split，不能只使用同名文件。
+If you already have the upstream split, place it at `datasets/CIFAR10_TRAIN_Split.pth` and retain its provenance. Matching a filename does not establish that two splits contain the same images.
 
-没有 split 时可生成新的、固定种子的研究划分：
+Otherwise, create a new deterministic research split:
 
 ~~~powershell
 python prepare_data.py --download --seed 2026
 ~~~
 
-生成：
+This writes `datasets/CIFAR10_TRAIN_Split.pth` and a companion JSON manifest containing the source indices, seed, and split SHA-256. Existing outputs are not overwritten.
 
-~~~text
-datasets/CIFAR10_TRAIN_Split.pth
-datasets/CIFAR10_TRAIN_Split.json
-~~~
-
-默认从官方 CIFAR-10 的 50000 张**训练图片**中，逐类分成：
-
-| 数据 | 数量 | 用途 |
+| Data | Default size | Purpose |
 | --- | --- | --- |
-| clean_train | 4800/类，共 48000 | 干净特征提取器预训练 |
-| others | 200/类，共 2000 | 受害微调、基图像和独立攻击目标 |
-| 官方 test | 1000/类，共 10000 | 仅用于干净测试准确率 |
+| `clean_train` | 4,800/class; 48,000 total | Clean proxy/victim pretraining |
+| `others` | 200/class; 2,000 total | Victim fine-tuning, poison bases, and held-out attack targets |
+| Official CIFAR-10 test set | 1,000/class; 10,000 total | Clean test accuracy |
 
-JSON 记录 seed、官方训练集源索引与 split SHA-256。该新划分不宣称等同于论文作者的原 split。新脚本拒绝覆盖已有数据文件。
+This is a new split, not a claim to reproduce the authors' original split. Train compatible checkpoints on it when starting a new study.
 
-默认受害训练取 others 中每类第 0..49 张，共 500 张；5 张 poison **原位替换**同类基图像，总数仍为 500。目标 index=0 指目标类第 50 张，index=49 指第 99 张，均不进入受害训练。修改训练窗口时，必须同步检查目标偏移和 base 偏移。
+The default victim set uses class positions 0–49 in `others`: 500 images total. Five poisons **replace their bases in place**, keeping the total at 500. Target index 0 selects class position 50; target index 49 selects position 99. These targets stay outside the victim-training window. Changes to `num_per_class` or `subset_group` must also keep target and base selection consistent.
 
-## 3. 准备干净模型
+## 3. Prepare clean checkpoints
 
-所有方法共享干净预训练权重。已有权重时核对配置中的模型名、模板和实际文件，直接进入下一步。
+Both victim scenarios share clean pretrained checkpoints. If suitable checkpoints already exist, verify the model names, filenames, and provenance, then skip pretraining.
 
-小规模流程只需 ResNet18 代理和 ResNet50 受害权重：
+The smoke configurations need a ResNet18 proxy and a ResNet50 victim:
 
 ~~~powershell
 python workflow.py --config configs/smoke.json --stage pretrain
 ~~~
 
-这一步仍是**每个模型 300 epochs 的真实预训练**；smoke 只缩短后面的攻击与受害微调，不把未训练网络当成有效预训练权重。
+This is still **300 epochs of actual pretraining per model**. Smoke configurations shorten attack optimization and victim fine-tuning, not clean pretraining. Do not run this stage again merely to switch the victim training scenario.
 
-单模型训练和恢复示例：
+Individual training, continuation, and checkpoint evaluation:
 
 ~~~powershell
 python train_cifar10_models.py --net ResNet18 --epochs 300 --device cuda --output-dir model-chks
 python train_cifar10_models.py --net ResNet18 --epochs 300 --device cuda --resume model-chks/ckpt-ResNet18-4800-latest.t7
 python train_cifar10_models.py --net ResNet18 --device cuda --evaluate-only --resume model-chks/ckpt-ResNet18-4800.t7
+python clean_test_evaluation.py --nets ResNet18 ResNet50 --device cuda --output runs/pretrained-clean-evaluation.json
 ~~~
 
-最佳权重默认保存为 model-chks/ckpt-ResNet18-4800.t7；latest 文件保存优化器、调度器和 RNG 状态。epochs 表示总轮数，resume 从已完成轮次的下一轮继续。模型和训练配置必须与原 checkpoint 匹配。
+The best checkpoint defaults to `model-chks/ckpt-ResNet18-4800.t7`. The `-latest` file also saves optimizer, scheduler, and RNG state. `--epochs` is the total epoch budget; `--resume` continues at the next epoch. Keep the model and training configuration compatible with the checkpoint.
 
-## 4. 先跑一个目标的完整流程
+## 4. Run one target through each scenario
 
-[smoke.json](configs/smoke.json) 包含 1 个目标、1 个代理、1 个受害、5 种方法，攻击 2 次迭代、受害微调 2 epochs。它用于验证路径和流程，不用于比较算法效果。
+The two smoke configurations use one target, one proxy, one victim, five methods, two poison iterations, and two victim-training epochs. They check execution and output consistency; their ASR is not a benchmark result.
+
+### Linear transfer
 
 ~~~powershell
 python verify_layerwise.py
+python workflow.py --config configs/smoke.json --stage plan
 python workflow.py --config configs/smoke.json --stage craft
 python workflow.py --config configs/smoke.json --stage evaluate
 python summarize_results.py runs/smoke-seed2026 --config configs/smoke.json
 ~~~
 
-craft 阶段只优化图片像素、固定代理网络，不进行受害微调。evaluate 阶段不再生成 poison；对每个受害重新加载同一个 checkpoint，分别训练 clean 和 poisoned 条件，并使用配对的随机种子与样本位置。
+The effective settings are `features + linear + eval`. The backbone is frozen, its final features are cached, and only the classifier head is trained with Adam at learning rate 0.1.
 
-需要一次执行所有阶段时可用 --stage all；它包含预训练，耗时很长。已有权重时使用上述分阶段命令。
+### MSP with full-parameter victim fine-tuning
 
-## 5. 正式实验
+Use the same prepared data and clean checkpoints:
 
-[benchmark.json](configs/benchmark.json) 配置：
+~~~powershell
+python workflow.py --config configs/smoke_end2end.json --stage plan
+python workflow.py --config configs/smoke_end2end.json --stage craft
+python workflow.py --config configs/smoke_end2end.json --stage evaluate
+python summarize_results.py runs/smoke-end2end-seed2026 --config configs/smoke_end2end.json
+~~~
 
-- 目标 0..49，6 种方法。
-- 6 种代理架构 × 3 个 checkpoint 模板 = 18 个代理实例。
-- dropout 为 0.2、0.25、0.3；net_repeat=1，不代表只有 1 个代理。
-- 5 poisons，800 次优化，Adam lr=0.04，像素预算 epsilon=0.1。
-- DenseNet121、ResNet18 两个受害；分类头 Adam lr=0.1、60 epochs、30/45 衰减、batch=64。
-- seed=2026；正式报告还应复制配置分别执行多个种子并保存各自输出。
+The effective settings are `features + end2end + eval`. The attack retains its selected MSP representation. Victim fine-tuning updates the backbone and classifier with Adam at learning rate 1e-4 and weight decay 0. The smoke budget is two epochs; the formal configuration uses 60.
 
-先查看计划：
+In either scenario, `craft` only optimizes poison pixels. `evaluate` loads existing poisons, reloads the same victim checkpoint independently for clean and poisoned conditions, and uses paired training seeds and sample positions.
+
+`workflow.py --stage all` runs **pretrain → craft → evaluate**, including the expensive pretraining stage. Data preparation and result summarization are separate commands. With existing checkpoints, use the staged commands above.
+
+## 5. Run controlled benchmarks
+
+Use [benchmark.json](configs/benchmark.json) for linear transfer or [benchmark_end2end.json](configs/benchmark_end2end.json) for full-parameter victims.
+
+| Parameter | Shared attack settings | Linear victim | Full-parameter victim |
+| --- | --- | --- | --- |
+| Methods / targets | Six methods; targets 0–49 | Same | Same |
+| Proxy ensemble | Six architectures × three checkpoint templates = 18 instances | Same | Same |
+| Proxy dropout / repeats | 0.2, 0.25, 0.3 / `net_repeat=1` | Same | Same |
+| Poison budget | Five images; 800 iterations; Adam lr=0.04; pixel-space L∞ ε=0.1 | Same | Same |
+| Attack representation | `features` | Same | Same |
+| Victims | DenseNet121 and ResNet18 | Same | Same |
+| Victim updates / module mode | — | `linear / eval` | `end2end / eval` |
+| Victim optimizer / lr / weight decay | — | Adam / 0.1 / 0 | Adam / 1e-4 / 0 |
+| Victim epochs / batch / decay | — | 60 / 64 / epochs 30,45 | 60 / 64 / epochs 30,45 |
+| Seed | 2026 | Same | Same |
+
+The end-to-end presets explicitly specify their learning rate. When writing a custom CLI command, also pass the intended learning rate; selecting the training scenario alone is not a substitute for planning its optimizer settings.
+
+Start with a copy of a formal configuration using `"targets": [0]` and a new pilot `output_root`. Complete one target at the formal 800-iteration/60-epoch budget before expanding.
+
+Linear benchmark:
 
 ~~~powershell
 python workflow.py --config configs/benchmark.json --stage plan
-~~~
-
-确认权重准备方式后执行：
-
-~~~powershell
-# 没有相应权重才执行：18个代理权重 + 2个受害权重
+# Only if the required 18 proxy and two victim checkpoints are missing:
 python workflow.py --config configs/benchmark.json --stage pretrain
 python workflow.py --config configs/benchmark.json --stage craft
 python workflow.py --config configs/benchmark.json --stage evaluate
 python summarize_results.py runs/benchmark-seed2026 --config configs/benchmark.json
 ~~~
 
-正式配置有 300 个攻击任务，以及 300 × 2受害 × 2条件 = 1200 次受害训练。先复制配置将 targets 改为 [0]、output_root 改为新的 pilot 路径，跑完后再扩大到 50 个目标。
+Full-parameter benchmark, reusing the same clean checkpoints:
 
-如果改变 seed、epsilon、迭代数、权重或训练参数，也要改变 output_root。相同目录的 protocol.json 与当前设置或文件哈希不同会拒绝执行，避免旧结果混入新实验。生成完的最终 poison 会复用；evaluate 显式执行时会重新训练并更新评估。
+~~~powershell
+python workflow.py --config configs/benchmark_end2end.json --stage plan
+python workflow.py --config configs/benchmark_end2end.json --stage craft
+python workflow.py --config configs/benchmark_end2end.json --stage evaluate
+python summarize_results.py runs/benchmark-end2end-seed2026 --config configs/benchmark_end2end.json
+~~~
 
-## 6. 输出与指标
+If starting directly with the full-parameter configuration and no checkpoints, run its `--stage pretrain` first. Each benchmark plans 300 poison-generation jobs and 1,200 victim-training runs: 300 jobs × two victims × clean/poisoned conditions.
+
+Keep separate output roots for the two victim scenarios, and for changes to seed, epsilon, weights, iterations, or training settings. A recorded protocol mismatch prevents reuse of an incompatible run directory. Completed poison generation can be reused; explicitly running evaluation retrains the victims.
+
+For repeatability, copy the configuration for several seeds, use a separate output root for each, and report per-seed results before aggregating. Keep method budgets matched within a scenario.
+
+### Direct CLI and legacy compatibility
+
+For one MSP-Flat full-parameter experiment with the default checkpoint filenames:
+
+~~~powershell
+python craft_poisons_transfer.py --stage all --device cuda --mode mean --feature-mode flat --attack-representation features --victim-training end2end --victim-model-mode eval --substitute-nets ResNet18 --subs-chk-name ckpt-%s-4800.t7 --subs-dp 0 --target-net ResNet50 --target-index 0 --poison-num 5 --poison-ites 800 --poison-epsilon 0.1 --retrain-opt adam --retrain-lr 1e-4 --retrain-wd 0 --retrain-epochs 60 --chk-path runs/direct-msp-flat-end2end
+~~~
+
+For linear transfer, select `--victim-training linear --victim-model-mode eval` and the planned classifier-head learning rate, such as 0.1.
+
+The old `--end2end true` shorthand remains supported: with `feature-mode=original` it selects `blocks + end2end`; with an MSP feature mode it selects `features + end2end`. Prefer the three explicit options in new experiments. Conflicting legacy and explicit victim-training settings are rejected.
+
+To study the original block attack, use `attack.representation="blocks"` with `BP-E2E-Original`/`CP-E2E-Original`, block-capable proxies, and an explicitly specified victim scenario. DenseNet, GoogLeNet, or MobileNetV2 may still be victims.
+
+## 6. Outputs and metrics
 
 ~~~text
-runs/benchmark-seed2026/
+runs/benchmark-end2end-seed2026/
   MSP-Flat/
     flat/mean/800/0/
       protocol.json
@@ -181,36 +233,40 @@ runs/benchmark-seed2026/
   summary.csv
 ~~~
 
-poison 文件编号从 0 开始，因此 800 次迭代的最后文件是 poison_00799.pth。快照每 50 次和最后一次保存。
+Poison filenames use zero-based iteration indices: 800 updates end at `poison_00799.pth`. Snapshots are saved every 50 iterations and at the final iteration.
 
-protocol 记录实际算法、全部参数、数据与模型 SHA-256；craft 记录生成耗时与 GPU 峰值分配内存；evaluation 记录基图像索引、实际扰动、clean/poisoned 目标预测、概率和测试准确率。旧日志分析器不应读取新 JSON 日志；新结果使用 summarize_results.py。
+The run protocol uses schema version 2; configuration files still use version 1. The protocol records the method, attack representation, victim training and module mode, parameters, and data/checkpoint hashes. Generation records include time and peak GPU allocation. Evaluation records include base indices, measured perturbations, paired predictions, probabilities, test accuracy, trainable-parameter counts, and a sampled backbone parameter change. The backbone probe is a diagnostic, not a complete parameter-by-parameter audit. Use a new output root when migrating an older protocol.
 
-| 指标 | 含义 |
+| Metric | Meaning |
 | --- | --- |
-| ASR | 全部目标中，被投毒受害模型预测为 poison 类的比例 |
-| conditional ASR | 只在干净微调受害模型原本正确的目标中计算 ASR |
-| eligible targets | 条件 ASR 的分母；为 0 时结果为 null/N/A |
-| clean accuracy drop | 干净微调与投毒微调后的测试准确率差，单位百分点 |
-| seconds / peak_allocated_bytes | 成本记录；CPU 的 GPU 显存字段为 null |
+| ASR | Fraction of all targets predicted as the poison class by the poisoned victim |
+| Conditional ASR | ASR among targets correctly classified after matched clean victim fine-tuning |
+| Eligible targets | Conditional-ASR denominator; zero gives null/N/A |
+| Clean accuracy drop | Clean-condition test accuracy minus poisoned-condition accuracy, in percentage points |
+| Seconds / peak allocation | Recorded resource cost; GPU-memory fields are null for CPU runs |
 
-配置指定的任务未齐全或发现额外结果时，汇总默认非零退出，缺失列表写入 summary.json；查看进行中结果可显式加 --allow-incomplete。汇总还会拒绝重复目标、混合训练协议和不一致的 base 选择。
+The summarizer checks configured coverage and rejects duplicate identities, mixed training/data protocols, or inconsistent base selection. Incomplete coverage exits nonzero and is listed in `summary.json`; use `--allow-incomplete` explicitly to inspect a run in progress. Summarize linear and full-parameter runs separately.
 
-## 7. 测试和历史入口
+## 7. Tests, historical results, and scope
 
 ~~~powershell
 python -m unittest discover -s tests -v
 python verify_layerwise.py
 ~~~
 
-tests 中的数据选择/加载契约使用 mock，可在没有训练依赖时执行；真实张量测试缺少 torch 会明确跳过。verify_layerwise 需要真实 PyTorch，覆盖七种架构，不需要数据或 checkpoint；它不能替代一次真实权重加载、生成和受害训练。
+Contract tests exercise production selection/loading logic through small mocks. Tensor regressions require torch and report skips explicitly when it is absent. The real-architecture verifier covers seven architectures without data or checkpoints. Tests and historical CI checks do not establish the ASR of the current pipeline; validation details are recorded in [MIGRATION.md](docs/MIGRATION.md).
 
-历史脚本、可用性研究、从零训练评估与车辆多目标实验的每个入口及限制，见 [脚本目录](docs/SCRIPT_CATALOG.md)。新版统一流程以 CIFAR-10 单目标实验为主；不能把 availability 的准确率下降当成 targeted ASR，也不能用目录名推断真实数据 overlap。
+Earlier GitHub CI passed the contract/tensor checks and seven-architecture verification for the revision it tested. Historical end-to-end result folders are retained as evidence of earlier experiments; they do not establish that the new pipeline used the same data, checkpoints, hyperparameters, or execution path. New claims require running the documented configuration and retaining its provenance.
 
-**本次验证状态（2026-10-25）：** 当前工作环境缺少 torch/torchvision、数据与 checkpoint；已执行的测试和未执行的完整实验详见 [迁移与验证记录](docs/MIGRATION.md)。仓库中的既有结果不作为本次重构后的实测成绩。
+The runnable unified pipeline currently targets CIFAR-10 single-target experiments. Historical CIFAR-100 outputs are not a claim of strict CIFAR-100 reproduction by this pipeline. Availability experiments and external-car multi-target experiments use different protocols; see the [complete script catalog](docs/SCRIPT_CATALOG.md). Availability accuracy degradation is not targeted ASR, and directory names do not prove proxy/victim pretraining overlap.
 
-## 来源与引用
+The [archived GitHub introduction and visualizations](docs/LEGACY_GITHUB_README.md) retain the original remote figure links. The [upstream README](docs/UPSTREAM_README.md) preserves the original experiment description.
 
-原实现来自 [Bullseye Polytope](https://arxiv.org/abs/2005.00191)，并沿用了 [Convex Polytope](https://github.com/zhuchen03/ConvexPolytopePosioning/) 的方法与实现基础；模型来源见上游说明。MSP 是本仓库的多层攻击特征扩展，不冒充原论文的官方复现或已发表成果。
+## Acknowledgments and citation
+
+The implementation builds on [Bullseye Polytope](https://arxiv.org/abs/2005.00191), which in turn builds on [Convex Polytope](https://github.com/zhuchen03/ConvexPolytopePosioning/). Model implementations originate from [kuangliu/pytorch-cifar](https://github.com/kuangliu/pytorch-cifar). Please retain the upstream authors' credit and cite their work when using it.
+
+MSP is this repository's multistage attack-feature extension; the documentation does not claim official paper reproduction or a measured performance improvement.
 
 ~~~bibtex
 @article{aghakhani2020bullseye,

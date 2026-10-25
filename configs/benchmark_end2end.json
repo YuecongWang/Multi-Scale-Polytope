@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "name": "CIFAR-10 matched BP/CP/MSP full-parameter victim benchmark",
+  "dataset": {
+    "split": "datasets/CIFAR10_TRAIN_Split.pth",
+    "root": "datasets"
+  },
+  "model_directory": "model-chks",
+  "output_root": "runs/benchmark-end2end-seed2026",
+  "device": "cuda",
+  "gpu": "0",
+  "seed": 2026,
+  "pretrain": {
+    "epochs": 300,
+    "lr": 0.1,
+    "batch_size": 128,
+    "seed": 1226,
+    "sidx": 0,
+    "eidx": 4800,
+    "workers": 0,
+    "milestones": [
+      150,
+      225
+    ]
+  },
+  "attack": {
+    "methods": [
+      "BP-Original",
+      "CP-Original",
+      "MSP-Pool",
+      "MSP-Flat",
+      "MSP-Flat-Layerwise",
+      "BP-3Layer-Pool-Control"
+    ],
+    "targets": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49
+    ],
+    "substitute_nets": [
+      "DPN92",
+      "SENet18",
+      "ResNet50",
+      "ResNeXt29_2x64d",
+      "GoogLeNet",
+      "MobileNetV2"
+    ],
+    "checkpoints": [
+      "ckpt-%s-4800-dp0.200-droplayer0.000-seed1226.t7",
+      "ckpt-%s-4800-dp0.250-droplayer0.000-seed1226.t7",
+      "ckpt-%s-4800-dp0.300-droplayer0.000.t7"
+    ],
+    "dropouts": [
+      0.2,
+      0.25,
+      0.3
+    ],
+    "net_repeat": 1,
+    "target_label": 6,
+    "poison_label": 8,
+    "target_start": 50,
+    "poison_num": 5,
+    "iterations": 800,
+    "lr": 0.04,
+    "epsilon": 0.1,
+    "optimizer": "adam",
+    "representation": "features"
+  },
+  "victim": {
+    "nets": [
+      "DenseNet121",
+      "ResNet18"
+    ],
+    "checkpoint": "ckpt-%s-4800.t7",
+    "epochs": 60,
+    "lr": 0.0001,
+    "optimizer": "adam",
+    "momentum": 0.9,
+    "weight_decay": 0.0,
+    "batch_size": 64,
+    "num_per_class": 50,
+    "milestones": [
+      30,
+      45
+    ],
+    "training": "end2end",
+    "model_mode": "eval"
+  }
+}

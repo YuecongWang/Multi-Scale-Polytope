@@ -71,6 +71,61 @@ class TensorTests(unittest.TestCase):
         self.assertFalse(model.scale.requires_grad)
         self.assertIsNone(model.scale.grad)
 
+    def test_msp_feature_objectives_do_not_require_a_block_forward(self):
+        class Toy(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.scale = nn.Parameter(torch.ones(()))
+            def forward(self, x, penu=False):
+                return x.flatten(1)*self.scale
+            def _msp_last_three_features(self, x):
+                return [self.scale*x, self.scale*x*2, self.scale*x*3]
+            def penultimate2(self, x):
+                return torch.cat([feature.flatten(1) for feature in self._msp_last_three_features(x)], 1)
+            def penultimate1(self, x):
+                return torch.cat([feature.mean((2, 3)) for feature in self._msp_last_three_features(x)], 1)
+        self.ns['get_CP_loss'] = lambda *args, **kwargs: (torch.tensor(0.), [], 0)
+        self.ns['get_poison_tuples'] = lambda batch, label: [(image.detach().cpu(), label) for image in batch()]
+        for feature in ('pool', 'flat', 'pool-layerwise', 'flat-layerwise'):
+            with self.subTest(feature=feature):
+                model = Toy()
+                base = [torch.full((3, 2, 2), .5) for _ in range(2)]
+                with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+                    poisons = self.ns['make_convex_polytope_poisons']([model], Toy(), base,
+                        torch.ones(1, 3, 2, 2), device='cpu', mode='mean', feature_mode=feature,
+                        end2end=False, iterations=2, epsilon=.02, lr=.2,
+                        mean=torch.zeros(1, 3, 1, 1), std=torch.ones(1, 3, 1, 1),
+                        chk_path=directory, poison_idxes=[0, 1], poison_label=8)
+                    snapshot = torch.load(Path(directory)/'poison_00001.pth', weights_only=False)
+                self.assertEqual(snapshot['attack_representation'], 'features')
+                self.assertGreater(float((poisons[0][0]-base[0]).abs().sum()), 0)
+
+    def test_original_block_attack_accepts_a_nonblock_diagnostic_victim(self):
+        class Proxy(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.scale = nn.Parameter(torch.ones(()))
+                self.block_calls = 0
+            def forward(self, x, penu=False, block=False):
+                if block:
+                    self.block_calls += 1
+                    return [x*self.scale, x*self.scale*2]
+                return x.flatten(1)*self.scale
+        class Victim(nn.Module):
+            def forward(self, x, penu=False):
+                return x.flatten(1)
+        self.ns['get_CP_loss'] = lambda *args, **kwargs: (torch.tensor(0.), [], 0)
+        self.ns['get_CP_loss_end2end'] = self.ns['get_CP_loss']
+        self.ns['get_poison_tuples'] = lambda batch, label: [(image.detach().cpu(), label) for image in batch()]
+        proxy = Proxy()
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            self.ns['make_convex_polytope_poisons']([proxy], Victim(),
+                [torch.full((3, 2, 2), .5) for _ in range(2)], torch.ones(1, 3, 2, 2),
+                device='cpu', mode='mean', end2end=True, iterations=1,
+                mean=torch.zeros(1, 3, 1, 1), std=torch.ones(1, 3, 1, 1),
+                chk_path=directory, poison_idxes=[0, 1], poison_label=8)
+        self.assertGreater(proxy.block_calls, 1)
+
 
 if __name__ == '__main__':
     unittest.main()

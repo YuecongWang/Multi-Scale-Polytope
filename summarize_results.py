@@ -19,7 +19,8 @@ def summarize(root):
         if 'parameters' in payload['protocol']:
             protocol = payload['protocol']
             common = dict(parameters={key: value for key, value in protocol['parameters'].items()
-                                      if key not in ('mode', 'feature_mode', 'target_index')},
+                                      if key not in ('mode', 'feature_mode', 'target_index',
+                                                     'attack_representation', 'attack_end2end')},
                           data=protocol['data'], substitutes=protocol['substitutes'], victims=protocol['victims'])
             if shared_protocol is not None and common != shared_protocol:
                 raise ValueError('Different training/data protocols in one summary root: ' + str(path))
@@ -37,11 +38,17 @@ def summarize(root):
             grouped[identity[:3]].append(result)
     rows = []
     for (method, victim, seed), results in sorted(grouped.items()):
+        training = results[0].get('victim_training', 'linear')
+        module_mode = results[0].get('victim_model_mode', 'eval')
+        if any((result.get('victim_training', 'linear'), result.get('victim_model_mode', 'eval'))
+               != (training, module_mode) for result in results):
+            raise ValueError('Mixed victim training modes in one summary group')
         count = len(results)
         eligible = [result for result in results if result['clean_target_correct']]
         clean = sum(result['clean']['clean_accuracy_percent'] for result in results) / count
         poisoned = sum(result['poisoned']['clean_accuracy_percent'] for result in results) / count
         rows.append(dict(method=method, victim=victim, seed=seed, targets=count,
+            victim_training=training, victim_model_mode=module_mode,
             eligible_targets=len(eligible), successes=sum(result['attack_success'] for result in results),
             asr_percent=100 * sum(result['attack_success'] for result in results) / count,
             conditional_asr_percent=(100 * sum(result['attack_success'] for result in eligible) / len(eligible)
@@ -64,12 +71,18 @@ def main(argv=None):
         missing = set()
         unexpected = set()
         if args.config:
-            from workflow import load_config
+            from workflow import load_config, method_training_options
             config = load_config(args.config)
             expected = {(method, victim, config.get('seed', 2026), target)
                         for method in config['attack']['methods'] for victim in config['victim']['nets']
                         for target in config['attack']['targets']}
             missing, unexpected = expected-seen, seen-expected
+            for row in rows:
+                if row['method'] not in config['attack']['methods']:
+                    continue  # Report extra methods through the usual completeness check.
+                settings = method_training_options(config['attack'], config['victim'], row['method'])
+                if (row['victim_training'], row['victim_model_mode']) != (settings['victim_training'], settings['victim_model_mode']):
+                    raise ValueError('Evaluation victim training mode does not match --config: ' + row['method'])
         output = Path(args.root)
         save_json(output / 'summary.json', dict(rows=rows, missing=sorted(missing), unexpected=sorted(unexpected)))
         with (output / 'summary.csv').open('w', encoding='utf-8-sig', newline='') as stream:

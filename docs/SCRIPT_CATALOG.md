@@ -12,6 +12,8 @@
 
 BP、CP 和 MSP 可以共用同一套干净预训练及受害模型训练协议。它们的主要实验变量是毒样本生成时的特征与目标函数。为公平对照，不应仅为使两个项目“看起来不同”而同时更换数据划分、受害训练轮数或优化器。
 
+新版主流程把三个选择分开：`attack.representation=features/blocks` 决定毒样本生成的表征；`victim.training=linear/end2end` 决定受害更新分类头还是全部参数；`victim.model_mode=eval/train` 决定优化时的 BN/Dropout 模式，linear 只允许 eval。MSP 使用 features，支持两种受害训练。原 block 目标只要求代理支持 block 接口，诊断受害用末层特征；七个模型家族都可以作为全参数受害。这里没有展开并微分受害训练过程。
+
 脚本类别如下：
 
 - **数值验证**：使用断言检查特征、损失和梯度；不会生成研究结论。
@@ -33,7 +35,7 @@ BP、CP 和 MSP 可以共用同一套干净预训练及受害模型训练协议�
 7. 历史 800 轮毒样本可用 `evaluate_saved_poisons.py` 复评；旧格式 JSON/Pickle 可用 `analysis/`。两者不能只改目录名就替代新协议。
 8. 可用性实验与外部车辆多目标实验属于不同协议，分别参见相应章节，不与单目标迁移攻击的 ASR 混报。
 
-`configs/smoke.json` 缩小了生成迭代、目标与受害训练轮数，用来验证执行链；其中 pretrain 仍保留正式的 300 epochs。`configs/benchmark.json` 给出 50 目标、18 代理、6 方法和 2 受害的受控比较。`--stage all` 会先执行完整预训练，再生成，再评估，只有准备承担全部计算成本时才使用。
+`configs/smoke.json` 和 `configs/benchmark.json` 为 linear；对应的 `configs/smoke_end2end.json` 和 `configs/benchmark_end2end.json` 保留同样攻击方法，以 features 表征搭配全参数受害。smoke 缩小生成迭代、目标与受害训练轮数，但 pretrain 仍保留 300 epochs。两套 benchmark 都有 50 目标、18 代理、6 方法和 2 受害；全参数预设 Adam lr=1e-4、wd=0、60 epochs、eval，smoke 为2 epochs。`--stage all` 会先预训练，再生成，再评估；已有权重时使用 craft/evaluate。两套受害场景分别保存、分别汇总。
 
 `workflow.py` 仅负责 plan/pretrain/craft/evaluate/all；数据准备和结果汇总分别执行 `python prepare_data.py ...` 与 `python summarize_results.py <output_root> --config <config.json>`，不会被 `workflow.py --stage all` 自动调用。
 
@@ -46,7 +48,7 @@ BP、CP 和 MSP 可以共用同一套干净预训练及受害模型训练协议�
 | [`verify_layerwise.py`](../verify_layerwise.py) | **CPU 数值验证**。从 `trainer.py` 提取特征函数和质心损失函数；用 Toy 网络校验归一化残差为 0.5、重复采样结果与输入梯度，再校验真实网络的逐层拼接一致性和梯度 | PyTorch、根目录 `trainer.py`、`models/`；不需要数据或预训练权重 | 控制台 `PASS`；断言失败则非零退出。覆盖 DPN92、SENet18、ResNet50、ResNeXt29_2x64d、GoogLeNet、MobileNetV2、DenseNet121 七种架构的 flat/pool 逐层接口；不覆盖真实权重加载或完整攻击 |
 | [`train_cifar10_models.py`](../train_cifar10_models.py) | **干净预训练**。在 split 的 `clean_train` 中逐类选择 `[sidx,eidx)`，用裁剪/翻转增强和 SGD 训练模型；支持 Windows DataLoader、CPU/CUDA 和训练恢复 | `--data-path/--dset-path`、模型名、dropout、种子、每类索引范围、学习率、总 epochs、milestones；`--resume` 继续训练，`--evaluate-only --resume` 仅评估 | 默认 `model-chks/` 下最佳与 `-latest` `.t7`。可用 `--output-dir/--checkpoint-name` 对齐配置模板；保存模型、优化器、调度器、RNG、配置及指标。旧权重缺恢复状态时给出明确提示 |
 | [`train_cifar10_models.sh`](../train_cifar10_models.sh) | **历史预训练包装器**。一次调用上述训练器 | 位置参数 `$1=GPU`、`$2=模型名` | 固定 seed=2020、dropout=0、每类 `[1,2400)` 的权重；不是训练所有代理/受害模型的总入口 |
-| [`craft_poisons_transfer.py`](../craft_poisons_transfer.py) | **单目标主入口**。`--stage craft` 仅优化像素，`evaluate` 读取已有毒样本并配对训练 clean/poisoned 受害，`all` 两者串行 | split、权重模板、代理/受害列表、目标类/索引/offset、基图像类、`mode`、`feature-mode`、像素预算和训练参数；`--eval-poison-path` 可导入历史快照；支持 CPU/CUDA | `<chk-path>/<feature-mode>/<mode[-NRepeat]>/<iterations>/<target>/` 下的 `protocol.json`、毒样本快照、`evaluation-<victim>-seed<seed>.json`、`evaluation.json`、日志与摘要。记录数据/权重哈希，协议变更拒绝复用输出目录；`mean` 是 BP 质心目标，`convex` 是 CP，MSP 由 feature mode 选择 |
+| [`craft_poisons_transfer.py`](../craft_poisons_transfer.py) | **单目标主入口**。`--stage craft` 仅优化像素，`evaluate` 读取已有毒样本并配对训练 clean/poisoned 受害，`all` 两者串行 | split、权重模板、代理/受害列表、目标/基图像参数、`mode/feature-mode`、像素预算；`--attack-representation`、`--victim-training`、`--victim-model-mode` 独立选择表征/更新范围/模块模式；`--eval-poison-path` 导入快照；CPU/CUDA | `<chk-path>/<feature-mode>/<mode[-NRepeat]>/<iterations>/<target>/` 下的协议、毒样本、`evaluation-<victim>-seed<seed>.json`、`evaluation.json`、日志与摘要。记录数据/权重哈希与三项选择；MSP 支持 linear/full 两场景，必须用不同输出目录；旧 end2end 兼容映射见参数文档 |
 | [`craft_poisons_bp3pool.py`](../craft_poisons_bp3pool.py) | **兼容的三层池化逐层 BP 入口**。转发到主 `craft_poisons_transfer.py`，默认补入 `--mode mean --feature-mode pool-layerwise`，统一使用同一训练器 | 与主攻击器相同的 CLI 参数；未显式传入时才补默认 mode/feature mode | 与主流程相同的协议、毒样本与配对评估格式；该文件名里的“3”表示三层，不是 `--net-repeat 3` |
 | [`eval_poisons_transfer.py`](../eval_poisons_transfer.py) | **独立受害重训练与评估**。读取毒样本快照后重新加载受害模型；支持分类头迁移和 end-to-end 微调 | `--eval-poisons-root` 指向包含目标编号子目录的迭代根目录；受害权重、split、目标范围和微调参数 | 每目标 `eval-retrained-for-<epochs>epochs.json`，含预测、恶意类别分数、干净准确率与攻击日志统计。目标终点为 Python `range` 的排除端点；不是只做一次前向 |
 | [`eval_poisons_scratch.py`](../eval_poisons_scratch.py) | **历史从零训练评估**。随机初始化受害网络，读取固定列表的攻击快照分别训练 | split、既有毒样本、目标范围、受害模型名、训练参数 | `eval-scratch-for-<epochs>epochs.json`。源码快照列表固定为 1、51、101、201、401、801、1601、2801、4000 对应的计数；不是自动适配所有迭代数的通用入口；耗时大 |
@@ -71,11 +73,13 @@ python -m unittest discover -s tests -v
 
 | 脚本 | 输入与检查内容 | 输出及不能替代的验证 |
 | --- | --- | --- |
-| [`tests/test_workflow.py`](../tests/test_workflow.py) | **标准库回归测试**。读取 smoke/benchmark 配置；检查预训练/攻击命令能被真实 CLI 解析、方法路由、18 代理/300 方法目标任务、空调度、checkpoint 冲突、布尔解析、目标越界/重叠、配置拼写和协议混用；用临时 JSON 检查 ASR 分母与去重 | unittest 结果；不导入训练框架、不需要数据/权重，不执行真实训练 |
+| [`tests/test_workflow.py`](../tests/test_workflow.py) | **标准库回归测试**。读取 linear/full 两套 smoke/benchmark；检查 CLI 解析、攻击与受害独立路由、旧 end2end 映射、block 只限制代理、方法标签不能重标算法、非法组合、18 代理/300任务、空调度、checkpoint 冲突、数据窗口、协议及结果统计 | unittest 结果；不导入训练框架、不需要数据/权重，不执行真实训练 |
 | [`tests/test_data_contracts.py`](../tests/test_data_contracts.py) | **标准库数据/加载契约测试**。用 AST 读取生产选择/加载函数和小型 mock，检查毒样本替换与每类预算、subset group、位置保留、零扰动与 clean 顺序一致、标签/索引拒绝、基图像 offset、checkpoint 格式/路径/DataParallel 前缀和 CPU/CUDA 路由 | unittest 结果；验证生产 Python 逻辑，但没有真实文件读取、模型前向、张量、自动微分或 GPU |
-| [`tests/test_attack_tensors.py`](../tests/test_attack_tensors.py) | **真实 PyTorch 数值测试**。用小型 Toy 网络检查逐层等权损失区别于拼接隐含能量加权，并检查输入梯度、非默认 epsilon 像素投影、代理权重冻结 | unittest 结果；没有 PyTorch 时明确 `skipped`。Toy 网络通过仍不意味着真实 checkpoint/架构或完整攻击通过，应接着运行 `verify_layerwise.py` 和一个目标的完整实验 |
+| [`tests/test_attack_tensors.py`](../tests/test_attack_tensors.py) | **真实 PyTorch 数值测试**。Toy 网络检查逐层/拼接损失差异、输入梯度、epsilon 像素投影、代理冻结，以及 MSP features 不需要 block、原 block 攻击可使用无 block 的诊断受害 | unittest 结果；没有 PyTorch 时明确 `skipped`。Toy 网络通过仍不意味着真实 checkpoint/架构或完整攻击通过，应接着运行 `verify_layerwise.py` 和一个目标的完整实验 |
+| [`tests/test_victim_training.py`](../tests/test_victim_training.py) | **真实 CPU 受害训练回归**。合成数据搭配生产训练函数，检查 linear 缓存与骨干冻结、full 真实骨干更新、eval/train 的 BN 差异、最终 eval 指标、旧选项兼容、非法 linear+train，以及 MSP poison 接入全参数训练 | 优化器、梯度、模型参数和 BN 为真实 PyTorch；不下载数据，不要求 torchvision。缺 torch 明确跳过；不等价于七架构/真实权重的完整研究实验 |
+| [`tests/test_summary_training.py`](../tests/test_summary_training.py) | **标准库受害场景统计测试**。验证 linear 结果不能通过 full 配置检查、全参数训练字段被保留、同组不同训练方式拒绝平均 | 临时合成 JSON 与 unittest 结果；即使允许不完整任务，也不能绕过训练方式校验；不执行模型训练 |
 
-当前套件共 35 项，其中 2 项是真实张量测试，缺少 PyTorch 时显式跳过。`skipped` 表示相应验证未运行。应报告实际通过数与跳过数；标准库回归通过、真实张量测试通过、真实权重单目标冒烟通过和完整研究结果是四个不同层级。
+`skipped` 表示相应验证未运行。测试数量随版本增加，应报告当前提交实际通过数与跳过数；标准库回归通过、真实张量测试通过、真实权重单目标冒烟通过和完整研究结果是四个不同层级。历史 GitHub CI 通过的是其对应提交，不自动代表新增路径已通过。
 
 ## 根目录：批处理 PowerShell
 
@@ -173,7 +177,7 @@ python -m unittest discover -s tests -v
 | 文件 | 职责 | 输入/输出与测试边界 |
 | --- | --- | --- |
 | [`trainer.py`](../trainer.py) | 单目标 CP/BP 目标函数、MSP 特征路由、投影像素优化、受害训练、准确率统计 | 输入网络/目标/基图像/参数，返回毒样本或预测并按调用参数保存快照；不直接作为 CLI 运行 |
-| [`experiment_protocol.py`](../experiment_protocol.py) | 不依赖训练框架的方法注册表、布尔参数解析、攻击组合约束、checkpoint 路径解析及协议来源校验 | 定义 CP/BP/MSP 与 E2E 方法；拒绝不支持的 MSP+end-to-end、逐层+convex 和不匹配固定系数组合；`ensure_protocol` 防止同目录混用数据/权重/参数 |
+| [`experiment_protocol.py`](../experiment_protocol.py) | 不依赖训练框架的方法注册表、独立攻击/受害选项解析、布尔兼容、组合约束、checkpoint 路径及协议校验 | 定义 CP/BP/MSP 和原 block 兼容名；支持 MSP+全参数受害，拒绝 MSP+原 blocks、逐层+convex、linear+train及不匹配固定系数组合；`ensure_protocol` 防止同目录混用协议 |
 | [`trainer_bp3pool.py`](../trainer_bp3pool.py) | **兼容导出模块**。重新导出共享 `trainer.py` 的实现 | 保留旧导入名称；CP/BP/MSP 目标函数与受害训练均由同一个主 trainer 维护 |
 | [`dataloader.py`](../dataloader.py) | `PoisonedDataset` 将毒样本及其基图像索引注入指定 split；`FeatureSet` 缓存特征；`SubsetOfList` 按类别索引选子集 | 输出 Dataset 对象。常见每类 50 的 poisoned dataset 是用毒样本替换相应基图像位置，不是简单在 500 张干净图上额外加 5 张 |
 | [`utils.py`](../utils.py) | 预训练模型读取、目标与基图像读取、最近邻基图像搜索、毒样本元组构造、外部目标处理 | 供攻击器/评估器导入；模型加载与像素变换是其关键职责 |
@@ -184,7 +188,7 @@ python -m unittest discover -s tests -v
 | [`models/senet_msp.py`](../models/senet_msp.py) | SENet18；MSP 层为 layer2/3/4 | 同上；`test()` 不等价于整个攻击验证 |
 | [`models/dpn_msp.py`](../models/dpn_msp.py) | DPN26/DPN92；MSP 层为 layer2/3/4 | 同上；包含手动形状示例 |
 | [`models/resnext_msp.py`](../models/resnext_msp.py) | ResNeXt29 系列；MSP 层为 layer1/2/3 | 同上；尾部 `test_resnext()` 是形状示例 |
-| [`models/googlenet_msp.py`](../models/googlenet_msp.py) | GoogLeNet；MSP 层为 e4/a5/b5 | 保留原分类与末层特征接口；不支持原版 E2E 的 block=True |
+| [`models/googlenet_msp.py`](../models/googlenet_msp.py) | GoogLeNet；MSP 层为 e4/a5/b5 | 支持 MSP features 和全参数受害训练；缺原 block=True 接口仅限制它作为 blocks 攻击代理 |
 | [`models/mobilenetv2_msp.py`](../models/mobilenetv2_msp.py) | MobileNetV2；MSP 使用最后三个 cfg stage（96/160/320 通道） | 三层特征不含末尾 1280 通道投影；含手动测试函数 |
 | [`models/densenet_msp.py`](../models/densenet_msp.py) | DenseNet105/121 等；MSP 使用 dense2/3/4 原始输出 | dense4 在最终 BN/ReLU 之前；DenseNet121 已纳入 `verify_layerwise.py` 的真实架构特征/梯度检查 |
 
@@ -194,13 +198,15 @@ python -m unittest discover -s tests -v
 
 ### 远端已有、发布时保留的历史文件
 
-目标 GitHub 仓库原有文件随本次发布保留；它们与上面本地重构的92个脚本并存。
+目标 GitHub 仓库原有文件随发布保留，与上面的共享训练和实验脚本并存。
 
 | 文件 | 作用与适用范围 |
 | --- | --- |
 | `visualize_msp_features_bp_fixed_v3.py` | 历史特征几何可视化：加载同一目标、代理权重及 BP/MSP poison，计算质心/凸包几何误差，绘制热图、特征图和PCA等；不训练受害模型，不直接测量ASR。实际参数与示例见[原GitHub首页](LEGACY_GITHUB_README.md)及该脚本help。 |
 | `models/{densenet,dpn,googlenet,mobilenetv2,resnet,resnext,senet}.py` | GitHub原有模型实现仍可按模块直接导入；新版统一入口通过models包导出相应`*_msp.py`实现。旧文件不参与新版训练流程的默认模型路由。 |
 | `attack-results/feature-analysis*` | 远端原有图表和CSV保留作为历史资料，不是本次重构后的新实验成绩。 |
+
+本地既有 E2E 目录（如 `cifar10_e2e_bpprotocol_v1`、`cifar100_resnet18_six_end2end_v1`）属于历史证据，应结合各自日志和配置理解；目录存在不能证明新 features+全参数流水线已在同协议下复跑。新版主流程面向 CIFAR-10，不由旧 CIFAR-100 目录推出严格复现。
 
 | 用途 | 依赖及外部文件 | 资源建议 |
 | --- | --- | --- |

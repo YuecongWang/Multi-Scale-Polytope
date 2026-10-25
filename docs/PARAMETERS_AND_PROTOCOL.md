@@ -1,12 +1,28 @@
 # 参数与实验协议
 
-所有推荐参数都可以在 [smoke.json](../configs/smoke.json)、[benchmark.json](../configs/benchmark.json) 中查看。它们是可执行的实验起点，不代表已在当前机器调优或取得某种成功率。
+Linear 参数见 [smoke.json](../configs/smoke.json)、[benchmark.json](../configs/benchmark.json)；MSP 全参数受害微调见 [smoke_end2end.json](../configs/smoke_end2end.json)、[benchmark_end2end.json](../configs/benchmark_end2end.json)。它们是可执行的实验起点，不代表已在当前机器调优或取得某种成功率。
 
 ## 为什么训练过程相似
 
 本项目的分类网络仍是原有 ResNet、DPN 等；新增方法读取多层中间张量，不增加可训练参数。干净预训练负责获得特征提取器；攻击阶段固定模型、更新图像；受害训练负责检验图像是否改变分类结果。方法差异发生在第二步，因此第一步、第三步保持一致才便于归因。
 
 若 BP 与 MSP 结果相似，应检查特征是否真的切换、浅层是否被拼接能量掩盖、目标是否本来就被干净受害误分类，以及攻击是否收敛。不能把“不同训练命令”当作新算法，也不能预先保证 MSP 一定更好。
+
+## 攻击表征与受害训练分开配置
+
+| 选择 | JSON | 主攻击器 CLI | 实际控制 |
+| --- | --- | --- | --- |
+| 攻击表征 | `attack.representation` | `--attack-representation features/blocks` | `features` 使用 feature-mode 选择的末层/MSP目标；`blocks` 使用原 BP/CP block 目标 |
+| 受害更新范围 | `victim.training` | `--victim-training linear/end2end` | 只更新分类头，或更新受害模型全部预训练参数 |
+| 受害模块模式 | `victim.model_mode` | `--victim-model-mode eval/train` | 优化时 BN/Dropout 行为；linear 缓存特征，只允许 eval |
+
+MSP 的 pool、flat、flat-layerwise、pool-layerwise 都使用 `features`，可以搭配 linear 或 end2end 受害。方法名如 `MSP-Flat` 不随受害场景改名，场景单独记录。`eval` 不关闭 autograd；在 end2end+eval 下，骨干与分类头仍被优化，BN 运行统计固定。end2end+train 会让 BN/Dropout 使用训练模式，属于应单独记录的新协议；选择 train 不会自动加入图像增强。
+
+原 `BP-E2E-Original/CP-E2E-Original` 名称保留为 block 攻击的兼容名，缺省使用 blocks 和全参数受害；新配置应显式写出上述三项。block 接口只要求**代理**具备（ResNet、ResNeXt、DPN、SENet）；诊断受害始终使用原末层特征。MSP 的全参数受害训练不需要 block 接口，七个模型家族都可作为受害，包括 DenseNet、GoogLeNet 和 MobileNetV2。
+
+这里的 end2end 是从预训练 checkpoint 微调所有受害参数。毒样本生成仍冻结代理、仅更新像素；没有可微展开受害优化过程，也不表示随机初始化后从零训练。
+
+旧 `--end2end true` 保留兼容：未显式覆盖表征时，original 特征映射为 blocks+全参数受害，MSP 特征映射为 features+全参数受害。若旧选项与显式 victim-training 冲突会报错。新实验优先使用三个独立选项。
 
 ## 特征与损失
 
@@ -29,7 +45,7 @@
 
 | JSON 字段 | CLI / 含义 |
 | --- | --- |
-| schema_version | 当前固定为 1；未知字段报错，避免拼写错误静默生效 |
+| schema_version | 配置固定为 1；新运行 protocol 为 2，是另一文件格式；未知配置字段报错 |
 | name | 计划显示名称，不参与算法 |
 | dataset.split | 预训练 `--data-path`；攻击 `--train-data-path`，包含 PIL 图片的可信本地 split |
 | dataset.root | 两个训练入口的 `--dset-path`，官方 CIFAR-10 缓存目录 |
@@ -60,7 +76,8 @@ workflow 根据代理模板/架构/dropout 的组合和受害列表规划预训�
 
 | 字段 | 正式起点 | CLI 与规划 |
 | --- | --- | --- |
-| methods | 六种受控对照 | 自动映射 `--mode` 和 `--feature-mode`；原版 E2E 还映射 `--end2end true` |
+| methods | 六种受控对照 | 映射 `--mode`、`--feature-mode` 及默认表征；受害训练由 victim.training 独立指定 |
+| representation | features | `--attack-representation`；MSP 使用 features；blocks 只适用于 original 特征及 block 代理 |
 | targets | 0..49 | 每个值变为 `--target-index`，为目标类内部的相对索引 |
 | substitute_nets | 六个架构 | `--substitute-nets`；与 checkpoint 列表做笛卡尔积 |
 | checkpoints | 三个模板 | `--subs-chk-name`；每个模板都应有每个代理架构的实际文件 |
@@ -85,21 +102,43 @@ epsilon 是原始像素单位，不是标准化张量单位。投影先约束原
 
 ### 受害训练 victim
 
-| 字段 | linear 正式起点 | CLI 与规划 |
-| --- | --- | --- |
-| nets | DenseNet121, ResNet18 | `--target-net`；每个方法评估相同列表 |
-| checkpoint | ckpt-%s-4800.t7 | `--test-chk-name`；每次条件训练重新加载 |
-| epochs | 60 | `--retrain-epochs`，smoke 为2 |
-| optimizer / lr | adam / 0.1 | `--retrain-opt` / `--retrain-lr`，不要照搬为从零训练参数 |
-| momentum | 0.9 | `--retrain-momentum`，只用于SGD |
-| weight_decay | 0 | `--retrain-wd` |
-| batch_size | 64 | `--retrain-bsize`，包括缓存特征后的批大小 |
-| num_per_class | 50 | `--num-per-class`；默认10类×50=500张，含5毒样 |
-| milestones | [30,45] | `--lr-decay-epoch`，整数轮次，倍率0.1；空列表表示不衰减 |
+| 字段 | linear 正式起点 | 全参数正式起点 | CLI 与规划 |
+| --- | --- | --- | --- |
+| training | linear | end2end | `--victim-training`；与攻击 representation 独立 |
+| model_mode | eval | eval | `--victim-model-mode`；全参数另可消融 train，linear 只允许 eval |
+| nets | DenseNet121, ResNet18 | 相同 | `--target-net`；每个方法评估相同列表；七个模型家族均可做受害 |
+| checkpoint | ckpt-%s-4800.t7 | 相同 | `--test-chk-name`；每次条件训练重新加载 |
+| epochs | 60 | 60 | `--retrain-epochs`；两套 smoke 都为2 |
+| optimizer / lr | adam / 0.1 | adam / 1e-4 | `--retrain-opt` / `--retrain-lr`；这是配置预设，直接CLI也应显式填写 |
+| momentum | 0.9 | 0.9 | `--retrain-momentum`，只用于SGD |
+| weight_decay | 0 | 0 | `--retrain-wd`；不要与旧 block 包装器的5e-4混同 |
+| batch_size | 64 | 64 | `--retrain-bsize`，包括 linear 缓存特征后的批大小 |
+| num_per_class | 50 | 50 | `--num-per-class`；默认10类×50=500张，含5毒样 |
+| milestones | [30,45] | [30,45] | `--lr-decay-epoch`，整数轮次，倍率0.1；空列表表示不衰减 |
 
-linear 模式缓存原末层特征，只训练分类头。原版 E2E 则更新全部预训练参数，保持原实现的 eval 模式，即 BatchNorm 统计固定；不要把它描述为带常规 train-mode 数据增强的从零训练。
+linear 模式缓存原末层特征、冻结骨干并只训练分类头。end2end 模式不缓存特征，每个 batch 经骨干和分类头重新前向并反传。两者的受害图像变换都采用 ToTensor+Normalize；预训练所用的随机裁剪/翻转不会因选择 end2end 或 train 自动启用。评估目标和干净测试集时均切换到 eval。
 
-若研究原版 E2E，应另建配置，只选择 BP-E2E-Original/CP-E2E-Original，所有代理及诊断受害都选择支持 block 的架构，使用对应受害微调设置（旧脚本为 lr=1e-4、weight_decay=5e-4、60 epochs）并单独报告。此配置不能证明 MSP 的 E2E 效果。
+受害更新记录包括实际可训练参数数量及一个骨干参数样本的最大变化，帮助确认 linear 骨干不动、全参数训练确实走过骨干梯度。这个单参数探针不是对全部参数的逐项审计。
+
+两种场景复用同一组干净 checkpoint，但必须写入独立 output_root，分别汇总；不能把同名方法在不同受害协议下的结果合并。需要研究原 block 基线时，另建 `representation=blocks` 的配置，选择 block 代理并完整记录受害训练设置；历史 shell 的 lr=1e-4、wd=5e-4 与新版 MSP full 预设不同。
+
+### 两套分阶段命令
+
+完成 `prepare_data.py` 与相应预训练后，执行：
+
+~~~powershell
+# linear：features + linear + eval
+python workflow.py --config configs/smoke.json --stage craft
+python workflow.py --config configs/smoke.json --stage evaluate
+python summarize_results.py runs/smoke-seed2026 --config configs/smoke.json
+
+# MSP全参数：features + end2end + eval
+python workflow.py --config configs/smoke_end2end.json --stage craft
+python workflow.py --config configs/smoke_end2end.json --stage evaluate
+python summarize_results.py runs/smoke-end2end-seed2026 --config configs/smoke_end2end.json
+~~~
+
+正式流程对应更换为 benchmark.json / benchmark_end2end.json 及各自的 output_root。`workflow --stage all` 只包含 pretrain/craft/evaluate；数据准备与汇总是独立命令。已有权重时不应重复执行 pretrain。
 
 ## 分阶段规划实验
 
@@ -123,5 +162,7 @@ benchmark 的三模板×六架构是18个**实例**，不是18种架构。50目�
 主流程的数据集采用原位替换，相同 seed 下 clean/poisoned 的样本索引位置一致；epsilon=0时图像与顺序逐项相同。历史防御工具依赖毒样本前置，因此 PoisonedDataset 默认兼容旧顺序，主 trainer 显式使用 preserve_order=True。
 
 split 中 clean_train/others 不相交，并不自动证明代理/受害预训练的100%/50%/0% overlap。只有明确掌握 checkpoint 所使用的实际数据文件与训练索引时，才可计算预训练集合交集；权重文件名不能代替这一证据。新 protocol 默认标记未知，保留数据与权重哈希供追溯。
+
+历史 E2E 目录仅说明对应旧结果文件存在，其实际生成协议应结合日志与 checkpoint 核查，不能视作新 features+全参数流水线已实测。当前新流程以 CIFAR-10 为主；保留的 CIFAR-100 结果不构成新版严格复现声明。
 
 可用性实验是另一套从零训练协议：2000干净样本中追加400张同类图像，类别分布改变，且总体poison占2400张的1/6。至少应比较 clean/unperturbed/random/MSP；二组脚本不能排除追加样本量和类不平衡造成的影响。其准确率下降不等于单目标ASR。

@@ -9,7 +9,7 @@ import sys
 import time
 
 from experiment_protocol import (checkpoint_path, ensure_protocol, file_identity,
-                                 method_name, parse_bool, validate_attack)
+                                 method_name, parse_bool, resolve_training_options, validate_attack)
 from experiment_recorder import save_json
 
 
@@ -31,7 +31,14 @@ def build_parser():
     p.add_argument('--stage', choices=['craft', 'evaluate', 'all'], default='all')
     p.add_argument('--gpu', default='0')
     p.add_argument('--device', choices=['cuda', 'cpu'], default='cuda')
-    p.add_argument('--end2end', type=parse_bool, nargs='?', const=True, default=False)
+    p.add_argument('--end2end', type=parse_bool, nargs='?', const=True, default=None,
+                   help='Legacy shorthand; prefer independent attack/victim options')
+    p.add_argument('--attack-representation', choices=['features', 'blocks'], default=None,
+                   help='Feature-mode objective or the original BP/CP block objective')
+    p.add_argument('--victim-training', choices=['linear', 'end2end'], default=None,
+                   help='Train the classifier head or all victim parameters')
+    p.add_argument('--victim-model-mode', choices=['eval', 'train'], default='eval',
+                   help='Victim module mode during optimization; independent of parameter selection')
     p.add_argument('--substitute-nets', nargs='+', default=['ResNet50', 'ResNet18'])
     p.add_argument('--target-net', nargs='+', default=['DenseNet121'])
     p.add_argument('--model-resume-path', default='model-chks')
@@ -81,7 +88,11 @@ def build_parser():
 
 
 def validate_args(a):
-    validate_attack(a.mode, a.feature_mode, a.end2end, a.net_repeat, a.poison_num)
+    options = resolve_training_options(a.end2end, a.feature_mode, a.attack_representation,
+                                       a.victim_training, a.victim_model_mode)
+    for name, value in options.items():
+        setattr(a, name, value)
+    validate_attack(a.mode, a.feature_mode, a.attack_end2end, a.net_repeat, a.poison_num)
     if len(a.subs_chk_name) != len(a.subs_dp):
         raise ValueError('Each substitute checkpoint template needs one --subs-dp value')
     if any(not 0 <= dp < 1 for dp in a.subs_dp):
@@ -98,8 +109,8 @@ def validate_args(a):
         raise ValueError('Poison count exceeds the victim per-class training budget')
     if min(a.poison_lr, a.retrain_lr, a.tol) <= 0 or a.retrain_wd < 0:
         raise ValueError('Learning rates/tolerance must be positive and weight decay nonnegative')
-    if a.end2end:
-        unsupported = [name for name in a.substitute_nets+a.target_net
+    if a.attack_end2end:
+        unsupported = [name for name in a.substitute_nets
                        if not name.startswith(('ResNet', 'ResNeXt', 'DPN', 'SENet'))]
         if unsupported:
             raise ValueError('Original E2E block interface unavailable for: ' + ', '.join(unsupported))
@@ -138,13 +149,15 @@ def run(a):
     final_path = output / f'poison_{a.poison_ites - 1:05d}.pth'
     parameters = {key: value for key, value in vars(a).items()
                   if key not in {'stage', 'resume_poison_ite', 'eval_poison_path', 'chk_path', 'chk_subdir'}}
-    protocol = dict(schema_version=1, method=method_name(a.mode, a.feature_mode, a.end2end),
+    protocol = dict(schema_version=2, method=method_name(a.mode, a.feature_mode, a.attack_end2end),
         parameters=parameters, data=file_identity(a.train_data_path),
         substitutes=[file_identity(checkpoint_path(a.model_resume_path, template, name))
                      for template in a.subs_chk_name for name in a.substitute_nets],
         victims=[file_identity(checkpoint_path(a.model_resume_path, a.test_chk_name, name))
                  for name in a.target_net],
-        training='all parameters in eval mode' if a.end2end else 'classifier head only in eval mode',
+        attack_representation=a.attack_representation, victim_training=a.victim_training,
+        victim_model_mode=a.victim_model_mode,
+        training=('all parameters' if a.end2end else 'classifier head only') + ' in ' + a.victim_model_mode + ' mode',
         overlap='unknown unless established by checkpoint training provenance')
     if a.eval_poison_path:
         protocol['imported_poison'] = file_identity(a.eval_poison_path)
@@ -195,13 +208,14 @@ def run(a):
                     decay_ites=a.poison_decay_ites, decay_ratio=a.poison_decay_ratio,
                     mean=torch.tensor(mean).view(1, 3, 1, 1), std=torch.tensor(std).view(1, 3, 1, 1),
                     chk_path=str(output), poison_idxes=indices, poison_label=a.poison_label,
-                    tol=a.tol, end2end=a.end2end, start_ite=start, poison_init=initial,
+                    tol=a.tol, end2end=a.attack_end2end, start_ite=start, poison_init=initial,
                     mode=a.mode, net_repeat=a.net_repeat, feature_mode=a.feature_mode)
                 save_json(output / 'craft.json', dict(seconds=time.perf_counter()-started,
                     timing_scope='model loading, target features, optimization, diagnostics and checkpoints',
                     peak_allocated_bytes=torch.cuda.max_memory_allocated() if a.device == 'cuda' else None,
                     warm_start_iteration=a.resume_poison_ite, iterations=a.poison_ites,
-                    method=protocol['method'], final_checkpoint=str(final_path)))
+                    method=protocol['method'], attack_representation=a.attack_representation,
+                    victim_training=a.victim_training, final_checkpoint=str(final_path)))
                 del proxies, diagnostic
                 if a.device == 'cuda':
                     torch.cuda.empty_cache()
@@ -212,7 +226,9 @@ def run(a):
             poisons, indices = state['poison'], state['idx']
             if len(poisons) != a.poison_num or any(int(label) != a.poison_label for _, label in poisons):
                 raise ValueError('Saved poison count/labels differ from requested evaluation')
-            for key, expected in (('feature_mode', a.feature_mode), ('mode', a.mode), ('end2end', a.end2end)):
+            # Historical checkpoint end2end described attack blocks, not victim parameter updates.
+            for key, expected in (('feature_mode', a.feature_mode), ('mode', a.mode),
+                                  ('end2end', a.attack_end2end), ('attack_representation', a.attack_representation)):
                 if key in state and state[key] != expected:
                     raise ValueError('Saved poison method metadata differs: ' + key)
             raw = torch.load(a.train_data_path, map_location='cpu', weights_only=False)['others']
@@ -245,6 +261,7 @@ def run(a):
                 eligible = measurements['clean']['prediction'] == a.target_label
                 success = measurements['poisoned']['prediction'] == a.poison_label
                 result = dict(victim=name, seed=a.seed, target_index=a.target_index,
+                    victim_training=a.victim_training, victim_model_mode=a.victim_model_mode,
                     target_label=a.target_label, poison_label=a.poison_label,
                     clean_target_correct=eligible, attack_success=success,
                     eligible_attack_success=success if eligible else None, **measurements)

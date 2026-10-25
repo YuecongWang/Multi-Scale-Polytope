@@ -5,10 +5,65 @@ import tempfile
 import unittest
 
 from craft_poisons_transfer import build_parser as attack_parser, validate_args
-from experiment_protocol import ensure_protocol, parse_bool, validate_attack
+from experiment_protocol import ensure_protocol, parse_bool, resolve_training_options, validate_attack
 from summarize_results import summarize
 from train_cifar10_models import build_parser as training_parser
-from workflow import ROOT, build_plan, load_config
+from workflow import ROOT, build_plan, load_config, method_training_options
+
+
+class TrainingOptionTests(unittest.TestCase):
+    def test_default_features_and_linear_victim(self):
+        self.assertEqual(resolve_training_options(None, 'original'), dict(
+            attack_representation='features', attack_end2end=False,
+            victim_training='linear', victim_model_mode='eval', end2end=False))
+
+    def test_legacy_true_keeps_original_blocks_but_preserves_msp_features(self):
+        original = resolve_training_options(True, 'original')
+        self.assertEqual(original['attack_representation'], 'blocks')
+        self.assertTrue(original['attack_end2end'])
+        self.assertTrue(original['end2end'])
+        for feature in ('pool', 'flat', 'flat-layerwise', 'pool-layerwise'):
+            with self.subTest(feature=feature):
+                settings = resolve_training_options(True, feature)
+                self.assertEqual(settings['attack_representation'], 'features')
+                self.assertFalse(settings['attack_end2end'])
+                self.assertTrue(settings['end2end'])
+
+    def test_victim_training_and_attack_representation_are_independent(self):
+        linear_blocks = resolve_training_options(None, 'original', 'blocks', 'linear')
+        self.assertTrue(linear_blocks['attack_end2end'])
+        self.assertFalse(linear_blocks['end2end'])
+        full_features = resolve_training_options(None, 'flat', 'features', 'end2end')
+        self.assertFalse(full_features['attack_end2end'])
+        self.assertTrue(full_features['end2end'])
+        self.assertEqual(resolve_training_options(True, 'original', 'features')['attack_representation'],
+                         'features')
+
+    def test_legacy_and_explicit_victim_conflicts_rejected(self):
+        for legacy, victim in ((True, 'linear'), (False, 'end2end')):
+            with self.subTest(legacy=legacy, victim=victim):
+                with self.assertRaisesRegex(ValueError, 'contradicts'):
+                    resolve_training_options(legacy, 'original', victim_training=victim)
+
+    def test_block_representation_requires_original_features(self):
+        with self.assertRaisesRegex(ValueError, 'blocks require'):
+            resolve_training_options(None, 'flat', 'blocks', 'end2end')
+        with self.assertRaisesRegex(ValueError, 'blocks require'):
+            validate_attack('mean', 'flat', True)
+        validate_attack('mean', 'flat', False)
+
+    def test_train_mode_requires_full_parameter_victim(self):
+        with self.assertRaisesRegex(ValueError, 'backbone frozen'):
+            resolve_training_options(None, 'flat', victim_training='linear', victim_model_mode='train')
+        settings = resolve_training_options(None, 'flat', victim_training='end2end', victim_model_mode='train')
+        self.assertEqual(settings['victim_model_mode'], 'train')
+
+    def test_invalid_explicit_routes_rejected(self):
+        for options in ({'attack_representation': 'unknown'}, {'victim_training': 'unknown'},
+                        {'victim_model_mode': 'unknown'}):
+            with self.subTest(options=options):
+                with self.assertRaises(ValueError):
+                    resolve_training_options(None, 'original', **options)
 
 
 class WorkflowTests(unittest.TestCase):
@@ -30,6 +85,10 @@ class WorkflowTests(unittest.TestCase):
                 validate_args(args)
                 self.assertEqual(args.stage, stage)
                 self.assertFalse(args.end2end)
+                self.assertEqual(args.attack_representation, 'features')
+                self.assertEqual(args.victim_training, 'linear')
+                self.assertEqual(args.victim_model_mode, 'eval')
+                self.assertNotIn('--end2end', command)
                 modes.add((args.mode, args.feature_mode))
         self.assertEqual(len(modes), 5)
 
@@ -59,7 +118,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(attack_parser().parse_args(['--end2end', 'False']).end2end)
         self.assertTrue(attack_parser().parse_args(['--end2end']).end2end)
 
-    def test_msp_e2e_and_convex_layerwise_rejected(self):
+    def test_msp_blocks_and_convex_layerwise_rejected(self):
         with self.assertRaises(ValueError):
             validate_attack('mean', 'flat', True)
         with self.assertRaises(ValueError):
@@ -72,10 +131,94 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'inside'):
             validate_args(args)
 
-    def test_e2e_unsupported_architecture_fails_before_loading_weights(self):
-        args = attack_parser().parse_args(['--end2end', 'true'])
+    def test_blocks_unsupported_proxy_fails_before_loading_weights(self):
+        args = attack_parser().parse_args(['--end2end', 'true', '--substitute-nets', 'DenseNet121'])
         with self.assertRaisesRegex(ValueError, 'block interface'):
             validate_args(args)
+
+    def test_full_parameter_configs_keep_feature_attacks_and_all_architectures(self):
+        for stem, jobs, epochs in (('smoke', 5, 2), ('benchmark', 300, 60)):
+            with self.subTest(config=stem):
+                config = load_config(ROOT / 'configs' / (stem + '_end2end.json'))
+                original = load_config(ROOT / 'configs' / (stem + '.json'))
+                self.assertEqual(config['attack']['methods'], original['attack']['methods'])
+                self.assertNotEqual(config['output_root'], original['output_root'])
+                self.assertEqual(config['victim']['nets'], original['victim']['nets'])
+                plan = build_plan(config)
+                self.assertEqual(len(plan['craft']), jobs)
+                for stage in ('craft', 'evaluate'):
+                    for command in plan[stage]:
+                        self.assertNotIn('--end2end', command)
+                        args = attack_parser().parse_args(command[2:])
+                        validate_args(args)
+                        self.assertEqual(args.attack_representation, 'features')
+                        self.assertEqual(args.victim_training, 'end2end')
+                        self.assertEqual(args.victim_model_mode, 'eval')
+                        self.assertTrue(args.end2end)
+                        self.assertEqual(args.retrain_lr, 1e-4)
+                        self.assertEqual(args.retrain_wd, 0)
+                        self.assertEqual(args.retrain_epochs, epochs)
+
+    def test_legacy_method_default_and_explicit_routes(self):
+        self.assertEqual(method_training_options({}, {}, 'BP-E2E-Original'), dict(
+            attack_representation='blocks', attack_end2end=True,
+            victim_training='end2end', victim_model_mode='eval', end2end=True))
+        self.assertFalse(method_training_options({}, {'training': 'linear'},
+                                                'BP-E2E-Original')['end2end'])
+        with self.assertRaisesRegex(ValueError, 'matching method label BP-Original'):
+            method_training_options({'representation': 'features'}, {}, 'BP-E2E-Original')
+
+    def test_workflow_representation_cannot_relabel_the_attack(self):
+        for method, representation, actual in (
+                ('BP-Original', 'blocks', 'BP-E2E-Original'),
+                ('BP-E2E-Original', 'features', 'BP-Original'),
+                ('CP-Original', 'blocks', 'CP-E2E-Original')):
+            with self.subTest(method=method, representation=representation):
+                with self.assertRaisesRegex(ValueError, 'matching method label ' + actual):
+                    method_training_options({'representation': representation}, {}, method)
+        settings = method_training_options({'representation': 'blocks'}, {'training': 'linear'},
+                                           'BP-E2E-Original')
+        self.assertTrue(settings['attack_end2end'])
+        self.assertFalse(settings['end2end'])
+        self.assertEqual(method_training_options({'representation': 'features'}, {}, 'MSP-Flat')
+                         ['victim_training'], 'linear')
+
+    def test_two_labels_cannot_collapse_into_one_algorithm(self):
+        config = json.loads((ROOT / 'configs/smoke.json').read_text())
+        config['attack']['methods'] = ['BP-Original', 'BP-E2E-Original']
+        config['attack']['representation'] = 'features'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'config.json'
+            path.write_text(json.dumps(config))
+            with self.assertRaisesRegex(ValueError, 'matching method label BP-Original'):
+                load_config(path)
+
+    def test_workflow_blocks_limit_proxies_but_not_diagnostic_victim(self):
+        config = json.loads((ROOT / 'configs/smoke.json').read_text())
+        config['attack']['methods'] = ['BP-E2E-Original']
+        config['attack']['substitute_nets'] = ['ResNet18']
+        config['victim']['nets'] = ['DenseNet121']
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'config.json'
+            path.write_text(json.dumps(config))
+            settings = load_config(path)
+            args = attack_parser().parse_args(build_plan(settings)['craft'][0][2:])
+            validate_args(args)
+            self.assertEqual(args.attack_representation, 'blocks')
+            self.assertEqual(args.victim_training, 'end2end')
+            config['attack']['substitute_nets'] = ['DenseNet121']
+            path.write_text(json.dumps(config))
+            with self.assertRaisesRegex(ValueError, 'block interface'):
+                load_config(path)
+
+    def test_workflow_rejects_linear_train_mode(self):
+        config = json.loads((ROOT / 'configs/smoke.json').read_text())
+        config['victim']['model_mode'] = 'train'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'config.json'
+            path.write_text(json.dumps(config))
+            with self.assertRaisesRegex(ValueError, 'backbone frozen'):
+                load_config(path)
 
     def test_configuration_typos_rejected(self):
         original = json.loads((ROOT / 'configs/smoke.json').read_text())

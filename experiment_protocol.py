@@ -6,6 +6,8 @@ from pathlib import Path
 from experiment_recorder import digest, save_json
 
 
+# Each definition is (objective, feature mode, use original attack blocks).
+# The third field describes attack representation, not victim parameter updates.
 METHODS = {
     "CP-Original": ("convex", "original", False),
     "BP-Original": ("mean", "original", False),
@@ -28,28 +30,62 @@ def parse_bool(value):
     raise argparse.ArgumentTypeError("Expected true/false")
 
 
-def validate_attack(mode, feature_mode, end2end, net_repeat=1, poison_num=5):
+def resolve_training_options(legacy_end2end, feature_mode, attack_representation=None,
+                             victim_training=None, victim_model_mode='eval'):
+    """Resolve attack features and victim training as independent choices.
+
+    Historical --end2end selects full victim fine-tuning and, for original
+    features, the original block attack. MSP keeps its selected features.
+    """
+    if legacy_end2end is not None and not isinstance(legacy_end2end, bool):
+        raise ValueError('legacy end2end must be true, false, or omitted')
+    if feature_mode not in ('original', 'pool', 'flat', 'flat-layerwise', 'pool-layerwise'):
+        raise ValueError('Unknown feature mode: ' + str(feature_mode))
+    legacy_training = 'end2end' if legacy_end2end else 'linear'
+    if victim_training is not None and victim_training not in ('linear', 'end2end'):
+        raise ValueError('victim-training must be linear or end2end')
+    if (legacy_end2end is not None and victim_training is not None
+            and victim_training != legacy_training):
+        raise ValueError('Explicit victim-training contradicts legacy --end2end')
+    victim_training = victim_training if victim_training is not None else legacy_training
+    if attack_representation is None:
+        attack_representation = 'blocks' if legacy_end2end and feature_mode == 'original' else 'features'
+    if attack_representation not in ('features', 'blocks'):
+        raise ValueError('attack-representation must be features or blocks')
+    if attack_representation == 'blocks' and feature_mode != 'original':
+        raise ValueError('Original attack blocks require feature-mode=original; MSP uses features')
+    if victim_model_mode not in ('eval', 'train'):
+        raise ValueError('victim-model-mode must be eval or train')
+    if victim_training == 'linear' and victim_model_mode != 'eval':
+        raise ValueError('Linear victim training requires model mode eval to keep the backbone frozen')
+    return dict(attack_representation=attack_representation,
+                attack_end2end=attack_representation == 'blocks',
+                victim_training=victim_training, victim_model_mode=victim_model_mode,
+                end2end=victim_training == 'end2end')
+
+
+def validate_attack(mode, feature_mode, attack_blocks, net_repeat=1, poison_num=5):
     if net_repeat < 1 or poison_num < 1:
         raise ValueError("net-repeat and poison-num must be positive")
     if feature_mode not in ("original", "pool", "flat", "flat-layerwise", "pool-layerwise"):
         raise ValueError("Unknown feature mode: " + feature_mode)
     if mode not in ("mean", "convex") and not mode.startswith("coeffs_fixed_type_"):
         raise ValueError("Unknown attack objective: " + mode)
-    if end2end and feature_mode != "original":
-        raise ValueError("MSP features currently support linear transfer only; end2end would ignore them")
+    if attack_blocks and feature_mode != "original":
+        raise ValueError("Original attack blocks require feature-mode=original; MSP uses features")
     if feature_mode.endswith("layerwise") and mode != "mean":
         raise ValueError("Layerwise comparisons require mode=mean")
     if mode.startswith("coeffs_fixed_type_"):
         number = mode.removeprefix("coeffs_fixed_type_")
         if number not in {str(i) for i in range(1, 11)}:
             raise ValueError("Fixed coefficient type must be 1..10")
-        if feature_mode != "original" or end2end or net_repeat != 1 or poison_num != 5:
-            raise ValueError("Fixed coefficient experiment requires original, linear, repeat=1, five poisons")
+        if feature_mode != "original" or attack_blocks or net_repeat != 1 or poison_num != 5:
+            raise ValueError("Fixed coefficient attack requires original features, repeat=1, five poisons")
 
 
-def method_name(mode, feature_mode, end2end):
+def method_name(mode, feature_mode, attack_blocks):
     for name, definition in METHODS.items():
-        if definition == (mode, feature_mode, end2end):
+        if definition == (mode, feature_mode, attack_blocks):
             return name
     return f"custom-{mode}-{feature_mode}"
 

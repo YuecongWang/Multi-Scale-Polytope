@@ -110,7 +110,7 @@ def least_squares_simplex(A, b, x_init, tol=1e-6, verbose=False, device='cuda'):
 def loss_from_center(subs_net_list, target_feat_list, poison_batch, net_repeat, end2end, feature_mode="original"):
     if feature_mode in ("flat-layerwise", "pool-layerwise"):
         if end2end or net_repeat < 1:
-            raise ValueError("Layerwise mode requires linear transfer and net_repeat >= 1")
+            raise ValueError("Layerwise features require the feature attack representation and net_repeat >= 1")
         losses = []
         for net, centers in zip(subs_net_list, target_feat_list):
             repeats = [extract_attack_features(net, poison_batch(), feature_mode)
@@ -271,16 +271,17 @@ def make_convex_polytope_poisons(subs_net_list, target_net, base_tensor_list, ta
         raise ValueError("Invalid epsilon or iteration range")
     if poison_init is None:
         poison_init = base_tensor_list
-    for network in list(subs_net_list) + [target_net]:
+    for network in subs_net_list:
         model = network.module if isinstance(network, nn.DataParallel) else network
         if end2end and 'block' not in inspect.signature(model.forward).parameters:
             raise ValueError(type(model).__name__ + ' does not support the original block=True E2E attack')
+    for network in list(subs_net_list) + [target_net]:
         for parameter in network.parameters():
             parameter.requires_grad_(False)
     if feature_mode != "original" and mode not in ("mean", "convex"):
         raise ValueError("pool/flat currently support --mode mean or convex only")
     if end2end and feature_mode != "original":
-        raise ValueError("pool/flat feature mode is only supported for linear-transfer attacks (end2end=False)")
+        raise ValueError("MSP feature modes use the feature representation, not the original block objective")
     if feature_mode in ("flat-layerwise", "pool-layerwise") and mode != "mean":
         raise ValueError("Layerwise controlled baseline supports --mode mean only")
     target_net.eval()
@@ -333,14 +334,9 @@ def make_convex_polytope_poisons(subs_net_list, target_net, base_tensor_list, ta
 
         s_init_coeff_list.append(s_coeff)
 
-    # Keep this for evaluation.
-    if end2end:
-        target_feat_in_target = [feat.detach() for feat in target_net(x=target, block=True)]
-        target_init_coeff = [[torch.ones(len(base_tensor_list), 1).to(device) / n_poisons
-                              for _ in range(len(target_feat_in_target))]]
-    else:
-        target_feat_in_target = target_net(x=target, penu=True).detach()
-        target_init_coeff = [torch.ones(len(base_tensor_list), 1).to(device) / n_poisons]
+    # Diagnostics always use the victim's final features. Victims need no block API.
+    target_feat_in_target = target_net(x=target, penu=True).detach()
+    target_init_coeff = [torch.ones(len(base_tensor_list), 1).to(device) / n_poisons]
 
     cp_loss_func = get_CP_loss_end2end if end2end else get_CP_loss
 
@@ -393,7 +389,7 @@ def make_convex_polytope_poisons(subs_net_list, target_net, base_tensor_list, ta
             # whether we are doing convex or mean mode, we want to see the convex loss function for the target victim.
             # Note this unification has done after running the attack for convex method and mean method (0-74), i.e.,
             # for convex 0-99 and mean 0-74 the "loss in target network" is showing different losses for convex vs. mean
-            target_loss, target_init_coeff, _ = cp_loss_func([target_net],
+            target_loss, target_init_coeff, _ = get_CP_loss([target_net],
                                                              [target_feat_in_target],
                                                              poison_batch,
                                                              target_init_coeff,
@@ -410,6 +406,8 @@ def make_convex_polytope_poisons(subs_net_list, target_net, base_tensor_list, ta
             torch.save({'poison': poison_tuple_list, 'idx': poison_idxes, 'coeffs_time': coeffs_time,
                         'poisons_time': poisons_time, 'target_loss': target_loss.detach(), 'total_loss': total_loss.detach(),
                         'feature_mode': feature_mode, 'mode': mode, 'end2end': end2end,
+                        'attack_representation': 'blocks' if end2end else 'features',
+                        'diagnostic_feature': 'victim final penultimate',
                         'epsilon': epsilon, 'iteration': ite,
                         'coeff_list': s_init_coeff_list, 'coeff_list_in_victim': target_init_coeff},
                        os.path.join(chk_path, "poison_%05d.pth" % ite))
@@ -458,16 +456,28 @@ def train_network_with_poison(net, target_img, poison_tuple_list, base_idx_list,
     # requires implementing a get_penultimate_params_list() method to get the parameter identifier of the net's last layer
     device = args.device
     model = net.module if isinstance(net, nn.DataParallel) else net
+    training_mode = getattr(args, 'victim_training', None) or ('end2end' if getattr(args, 'end2end', False) else 'linear')
+    module_mode = getattr(args, 'victim_model_mode', 'eval')
+    if training_mode not in ('linear', 'end2end') or module_mode not in ('eval', 'train'):
+        raise ValueError("Invalid victim training/module mode")
+    if training_mode == 'linear' and module_mode != 'eval':
+        raise ValueError("Cached linear features require victim_model_mode=eval")
+    full_training = training_mode == 'end2end'
+    head_parameters = list(model.get_penultimate_params_list())
+    head_ids = {id(parameter) for parameter in head_parameters}
+    backbone_probe = next(((name, parameter) for name, parameter in model.named_parameters()
+                           if id(parameter) not in head_ids), None)
+    probe_before = backbone_probe[1].detach().clone() if return_metrics and backbone_probe else None
     if args.retrain_epochs < 1:
         raise ValueError("retrain_epochs must be positive")
-    if args.end2end:
+    if full_training:
         for parameter in net.parameters():
             parameter.requires_grad_(True)
         params = net.parameters()
     else:
         for parameter in net.parameters():
             parameter.requires_grad_(False)
-        params = model.get_penultimate_params_list()
+        params = head_parameters
         for parameter in params:
             parameter.requires_grad_(True)
 
@@ -503,13 +513,13 @@ def train_network_with_poison(net, target_img, poison_tuple_list, base_idx_list,
     testset = torchvision.datasets.CIFAR10(root=args.dset_path, train=False, download=True, transform=transform_test)
     test_loader = torch.utils.data.DataLoader(testset, batch_size=500)
 
-    if not args.end2end:
+    if not full_training:
         # create a dataloader that returns the features
         poisoned_loader = torch.utils.data.DataLoader(FeatureSet(poisoned_loader, net, device=args.device),
                                                       batch_size=args.retrain_bsize, shuffle=True)
 
     for epoch in range(args.retrain_epochs):
-        net.eval()
+        net.train(module_mode == 'train')
         loss_meter = AverageMeter()
         acc_meter = AverageMeter()
         time_meter = AverageMeter()
@@ -522,7 +532,7 @@ def train_network_with_poison(net, target_img, poison_tuple_list, base_idx_list,
         for ite, (input, target) in enumerate(poisoned_loader):
             input, target = input.to(device), target.to(device)
 
-            if args.end2end:
+            if full_training:
                 feat = model.penultimate(input)
             else:
                 feat = input
@@ -550,7 +560,9 @@ def train_network_with_poison(net, target_img, poison_tuple_list, base_idx_list,
 
         if epoch == args.retrain_epochs - 1:
             # print the scores for target and base
-            target_pred = net(target_img.to(device))
+            net.eval()
+            with torch.no_grad():
+                target_pred = net(target_img.to(device))
             score, pred = target_pred.topk(1, 1, True, True)
             poison_pred_list = []
             for poison_img, _ in poison_tuple_list:
@@ -564,6 +576,7 @@ def train_network_with_poison(net, target_img, poison_tuple_list, base_idx_list,
                     poison_pred_list))
 
     # Evaluate the results on the clean test set
+    net.eval()
     val_acc_meter = AverageMeter()
     with torch.no_grad():
         for ite, (input, target) in enumerate(test_loader):
@@ -580,13 +593,19 @@ def train_network_with_poison(net, target_img, poison_tuple_list, base_idx_list,
                       format(epoch, ite, time.strftime("%Y-%m-%d %H:%M:%S"), acc=val_acc_meter))
 
     if save_state:
-        state_dict = {"state_dict": net.state_dict(), "epoch": epoch, "acc": val_acc_meter.avg}
+        state_dict = {"state_dict": net.state_dict(), "epoch": epoch, "acc": val_acc_meter.avg,
+                      "victim_training": training_mode, "victim_model_mode": module_mode}
         torch.save(state_dict, os.path.join(chk_path, 'last_epoch.pth'))
 
     print("* Prec: {}".format(val_acc_meter.avg))
     if return_metrics:
         logits = target_pred.detach().flatten().cpu()
         return dict(prediction=int(pred[0][0]), clean_accuracy_percent=val_acc_meter.avg,
+                    victim_training=training_mode, victim_model_mode=module_mode,
+                    trainable_parameters=sum(parameter.numel() for parameter in net.parameters() if parameter.requires_grad),
+                    backbone_parameter=backbone_probe[0] if backbone_probe else None,
+                    backbone_max_change=float((backbone_probe[1].detach()-probe_before).abs().max())
+                                        if probe_before is not None else None,
                     logits=logits.tolist(), probabilities=logits.softmax(0).tolist(),
                     train_samples=len(poisoned_dset), poison_count=len(poison_tuple_list))
     return pred[0][0].item()
