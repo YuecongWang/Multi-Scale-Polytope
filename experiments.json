@@ -1,0 +1,13 @@
+{
+  "victim_checkpoint_template": "ckpt-%s-4800.t7",
+  "model_directory": "model-chks",
+  "train_data_path": "datasets/CIFAR10_TRAIN_Split.pth",
+  "output_directory": "evaluation_recorded_v2",
+  "overlap": "unknown_not_verified",
+  "methods": {
+    "BP-Original": "runs/benchmark-seed2026/BP-Original/original/mean/800",
+    "MSP-Pool": "runs/benchmark-seed2026/MSP-Pool/pool/mean/800",
+    "MSP-Flat": "runs/benchmark-seed2026/MSP-Flat/flat/mean/800",
+    "MSP-Flat-Layerwise": "runs/benchmark-seed2026/MSP-Flat-Layerwise/flat-layerwise/mean/800"
+  }
+}

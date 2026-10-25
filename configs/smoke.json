@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "name": "CIFAR-10 pipeline smoke test (not a performance result)",
+  "dataset": {"split": "datasets/CIFAR10_TRAIN_Split.pth", "root": "datasets"},
+  "model_directory": "model-chks",
+  "output_root": "runs/smoke-seed2026",
+  "device": "cpu",
+  "gpu": "0",
+  "seed": 2026,
+  "pretrain": {"epochs": 300, "lr": 0.1, "batch_size": 128, "seed": 1226,
+               "sidx": 0, "eidx": 4800, "workers": 0, "milestones": [150, 225]},
+  "attack": {
+    "methods": ["BP-Original", "CP-Original", "MSP-Pool", "MSP-Flat", "MSP-Flat-Layerwise"],
+    "targets": [0], "substitute_nets": ["ResNet18"],
+    "checkpoints": ["ckpt-%s-4800.t7"], "dropouts": [0.0], "net_repeat": 1,
+    "target_label": 6, "poison_label": 8, "target_start": 50,
+    "poison_num": 5, "iterations": 2, "lr": 0.04, "epsilon": 0.1, "optimizer": "adam"
+  },
+  "victim": {"nets": ["ResNet50"], "checkpoint": "ckpt-%s-4800.t7", "epochs": 2,
+             "lr": 0.1, "optimizer": "adam", "batch_size": 64, "num_per_class": 50,
+             "milestones": [30, 45]}
+}
